@@ -7,11 +7,35 @@ name = "orion"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "pupremote" },
+    { name = "pybricks" },
     { name = "ruff" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ruff", specifier = ">=0.15.11" }]
+requires-dist = [
+    { name = "pupremote", specifier = ">=2.1.2" },
+    { name = "pybricks", specifier = ">=3.6.1" },
+    { name = "ruff", specifier = ">=0.15.11" },
+]
+
+[[package]]
+name = "pupremote"
+version = "2.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/f2/97dff0ccc4759519abd2ffdb26f5dfa34db50b572757d436ff230fbc35ea/pupremote-2.1.2.tar.gz", hash = "sha256:a73fc620473adbb69a370c3864b2b6bb0d4ed8ba52eeeda579882fde819b1c9e", size = 135075, upload-time = "2025-12-21T16:49:29.485Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/c6/5902d6ee96e10395b9bd8770bb859d33ecdf0f0ccef23cc31aaa9ae82042/pupremote-2.1.2-py3-none-any.whl", hash = "sha256:18ab643c97541a50fb9f08849ce3baa24f0f495224d17e19c06a60ccb2981def", size = 26855, upload-time = "2025-12-21T16:49:28.307Z" },
+]
+
+[[package]]
+name = "pybricks"
+version = "3.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/7f/30e66ae9e57375098803f19e6e397d1af3f8d848c105a5041d9934252b8a/pybricks-3.6.1.tar.gz", hash = "sha256:1836b5e14e143eec02a8c57d4677ab96a223a653e813567df072d90722d9f048", size = 47517, upload-time = "2025-05-01T09:32:10.847Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/e9/a6259aeea4e4b01e92eee917b868564580efd84abdf823357ce6be92489d/pybricks-3.6.1-py3-none-any.whl", hash = "sha256:ff177a4c4728df1ea22cc7ac63c403affd0d1f64cc389a385f5b27561ab08c23", size = 59762, upload-time = "2025-05-01T09:32:09.306Z" },
+]
 
 [[package]]
 name = "ruff"
