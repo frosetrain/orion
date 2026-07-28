@@ -3,8 +3,10 @@ name = "orion"
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "mpremote>=1.28.0",
     "pupremote>=2.1.2",
     "pybricks>=3.6.1",
+    "pybricksdev>=2.3.2",
     "ruff>=0.15.11",
 ]
 
@@ -12,4 +14,11 @@ dependencies = [
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "UP", "B", "SIM", "I"]
+select = ["ANN", "S", "B", "A", "C4", "CPY", "DTZ", "FIX", "ISC", "ICN", "LOG", "G", "PIE", "PYI", "Q", "RET", "SLF", "SIM", "TID", "ARG", "PTH", "I", "N", "PERF", "E", "W", "DOC", "D", "F", "UP", "FURB", "RUF", "TRY"]
+
+[project.optional-dependencies]
+# install to folder typings
+# uv pip install -r pyproject.toml --extra stubs --target typings
+stubs = [
+    "micropython-esp32-stubs==1.28.0.*"
+]
