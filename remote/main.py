@@ -287,7 +287,7 @@ while True:
         brightnesses[i] = s.clear_channel()
         if brightnesses[i] is not None:
             # logger.debug(f"sens {i}: rgb {rgb[0]} {rgb[1]} {rgb[2]}")
-            logger.debug("sens %s: %s", i, brightnesses[i])
+            logger.info("sens %s: %s", i, brightnesses[i])
         elif s.device_id is not None:
             # Exists but not sending data, because it was just reconnected. Reconfigure.
             logger.info("sens %s: reconnected, reconfiguring", i)
