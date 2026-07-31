@@ -1,8 +1,9 @@
 """LMS-ESP32 program for oRIon."""
 
 import logging
-from time import sleep_ms, ticks_diff, ticks_ms
+from time import sleep_ms, ticks_add, ticks_diff, ticks_ms
 
+import lpf2
 from machine import I2C, Pin
 from neopixel import NeoPixel
 from pupremote import PUPRemoteSensor
@@ -19,9 +20,9 @@ def select_mux(i2c: I2C, channel: int) -> None:
     if selected_channel != channel:
         try:
             i2c.writeto_mem(MUX_ADDRESS, 0, bytes([1 << channel]))
+            selected_channel = channel
         except OSError:
             logger.exception("Mux not found")
-        selected_channel = channel
 
 
 class TOFSenseF2Mini:
@@ -220,17 +221,77 @@ class TCS3472:
 def beacn(*_: list) -> int:
     """Flash the NeoPixel red (like a beacon light)."""
     global beacon_state, beacon_start_time
-    pixels[0] = (50, 50, 50)
+    pixels[0] = (255, 255, 255)
     pixels.write()
     beacon_state = 0
     beacon_start_time = ticks_ms()
     return 67
 
 
-# Connection to hub
-remote = PUPRemoteSensor(power=True, max_packet_size=16)
-remote.add_command("beacn", "b", "b")
-remote.add_channel("brigh", "BB")
+def patched_connect(self: lpf2.LPF2) -> None:
+    """Connect to the hub, using a fixed fast/slow UART probe.
+
+    Upstream `lpf2.LPF2.connect` counts loop iterations as milliseconds, so
+    interpreter overhead and GC pauses make the high-pulse measurement under-read.
+    The hub pulses at 16 ms, right on the `n < 16` boundary, so the probe randomly
+    picks the fast UART branch and then runs the handshake at 115200 against a hub
+    still listening at 2400. Measure elapsed time with ticks_ms and leave margin.
+    """
+    assert len(self.modes) > 0, "No modes (commands) defined"  # noqa: S101
+    fast_uart_hub = False
+    self.init_pins()
+    self.wrt_tx_pin(1, 5)  # Say hello!
+    self.wrt_tx_pin(0, 0)
+    for attempt in range(25):  # Wait for AOK
+        start = ticks_ms()
+        n = 0
+        while self.rx_pin.value() == 1:
+            sleep_ms(1)
+            n = ticks_diff(ticks_ms(), start)
+            if n > 20:
+                break
+        if self.debug:
+            logger.debug("probe %s: falling after ms high: %s", attempt, n)
+        if attempt > 10 and (n > 21 or n < 13):
+            fast_uart_hub = True
+            break
+        while self.rx_pin.value() == 0:
+            sleep_ms(1)  # Wait until rise again
+
+    if fast_uart_hub:
+        self.fast_uart()
+        sleep_ms(5)
+        self.write(b"\x04")
+    else:
+        self.slow_uart()
+        self.write(b"\x00")
+    self.write(self.setType(self.sensor_id))
+    self.write(self.defineModes())  # tell how many modes
+    self.write(self.defineBaud(115200))
+    self.write(self.defineVers("0.1", lpf2.__version__))
+    num = len(self.modes) - 1
+    for mode in reversed(self.modes):
+        sleep_ms(20)
+        self.setupMode(mode, num)
+        num -= 1
+
+    self.write(b"\x04")  # ACK
+    end = ticks_add(ticks_ms(), 2500)
+    while ticks_diff(end, ticks_ms()) > 0:  # Wait for ack
+        if self.readchar() == 0x04:  # BYTE_ACK
+            self.connected = True
+            break
+
+    if self.connected:
+        self.last_nack = ticks_ms()
+        logger.info("Connected to hub with sensor id %s", self.sensor_id)
+        if not fast_uart_hub:
+            self.fast_uart()
+    else:
+        logger.error("Failed to connect to hub")
+
+
+lpf2.LPF2.connect = patched_connect
 
 # Onboard NeoPixel
 pixels = NeoPixel(Pin(25), 1)
@@ -251,21 +312,33 @@ for i in range(2):
 beacon_state = 67
 beacon_start_time = 0
 flash_pattern = [
-    (0, (50, 50, 50)),
+    (0, (255, 255, 50)),
     (50, (0, 0, 0)),
-    (100, (50, 50, 50)),
+    (100, (255, 255, 255)),
     (150, (0, 0, 0)),
-    (500, (100, 0, 0)),
+    (500, (255, 0, 0)),
     (600, (0, 0, 0)),
 ]
 prev_connected = False
 
+# Connection to hub
+remote = PUPRemoteSensor(power=True, max_packet_size=16)
+# remote.lpup.debug = True
+remote.add_command("beacn", "b", "b")
+remote.add_channel("brigh", "BB")
+
 while True:
     connected = remote.process()
+    # Show black light when not connected to hub
+    if prev_connected and not connected:
+        pixels[0] = (0, 0, 0)
+        pixels.write()
+        prev_connected = False
+        continue
 
     # Show blue light when connected to hub (when hub code is not running)
     if not prev_connected and connected:
-        pixels[0] = (0, 0, 100)
+        pixels[0] = (0, 0, 255)
         pixels.write()
         prev_connected = True
 
@@ -287,7 +360,7 @@ while True:
         brightnesses[i] = s.clear_channel()
         if brightnesses[i] is not None:
             # logger.debug(f"sens {i}: rgb {rgb[0]} {rgb[1]} {rgb[2]}")
-            logger.info("sens %s: %s", i, brightnesses[i])
+            logger.debug("sens %s: %s", i, brightnesses[i])
         elif s.device_id is not None:
             # Exists but not sending data, because it was just reconnected. Reconfigure.
             logger.info("sens %s: reconnected, reconfiguring", i)
@@ -296,7 +369,7 @@ while True:
             logger.error("sens %s: gone", i)
 
     # Send -1 if reading is None
-    left_brightness = brightnesses[1] or -1
-    right_brightness = brightnesses[0] or -1
+    left_brightness = brightnesses[1] if brightnesses[1] is not None else -1
+    right_brightness = brightnesses[0] if brightnesses[0] is not None else -1
     print("Sending brightnesses", left_brightness, right_brightness)
     remote.update_channel("brigh", left_brightness, right_brightness)

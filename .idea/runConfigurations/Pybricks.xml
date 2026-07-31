@@ -2,7 +2,7 @@
   <configuration default="false" name="Pybricks" type="ShConfigurationType">
     <option name="SCRIPT_TEXT" value="uv" />
     <option name="INDEPENDENT_SCRIPT_PATH" value="true" />
-    <option name="SCRIPT_PATH" value="$USER_HOME$/.local/bin/uv" />
+    <option name="SCRIPT_PATH" value="/usr/bin/uv" />
     <option name="SCRIPT_OPTIONS" value="run pybricksdev run -n Alnilam --stay-connected ble main.py" />
     <option name="INDEPENDENT_SCRIPT_WORKING_DIRECTORY" value="true" />
     <option name="SCRIPT_WORKING_DIRECTORY" value="$PROJECT_DIR$" />

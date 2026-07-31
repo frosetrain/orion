@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="MicroPythonTools">
+    <option name="enableManualEditing" value="true" />
     <option name="lastShownVersion" value="2026.1.1" />
     <option name="pluginEnabled" value="true" />
-    <option name="portName" value="/dev/cu.usbserial-110" />
+    <option name="portName" value="/dev/ttyUSB0" />
+    <option name="shouldAutoDetect" value="false" />
   </component>
 </project>

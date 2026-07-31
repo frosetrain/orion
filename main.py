@@ -24,7 +24,13 @@ db.settings(straight_speed=750, straight_acceleration=1000, turn_rate=320, turn_
 print("db settings:", db.settings())
 
 # Initialise connection to remote
-remote = PUPRemoteHub(Port.B, max_packet_size=16)
+while True:
+    try:
+        remote = PUPRemoteHub(Port.B, max_packet_size=16)
+        hub.speaker.beep(523)
+        break
+    except OSError:
+        wait(10)
 remote.add_command("beacn", "b", "b")
 remote.add_channel("brigh", "BB")
 
@@ -56,6 +62,7 @@ def linetrack(
     db.reset()
 
     while True:
+        # Calculate some things
         stretch = max(0, theoretical - LIGHT_SENSOR_Y - 100)
         drive_limit = theoretical - LIGHT_SENSOR_Y + 50
         if slow and db.distance() > start:
@@ -78,6 +85,16 @@ def linetrack(
             hit = left_brightness > WHITE_THRESHOLD and right_brightness < BLACK_THRESHOLD
         else:
             hit = False
+
+        # If either light sensor is not working
+        if left_brightness == -1 or right_brightness == -1:
+            difference = 0  # Disable line tracking, just go straight
+            # Ignore light sensor readings for junction detection, instead use distance
+            hit = db.distance() >= theoretical
+        else:
+            difference = left_brightness - right_brightness if linetrack else 0
+
+        # Once reached junction
         if (hit and db.distance() > stretch) or db.distance() > drive_limit:
             if move_forward:
                 db.straight(LIGHT_SENSOR_Y, then=Stop.BRAKE)
@@ -85,9 +102,7 @@ def linetrack(
                 db.brake()
             break
 
-        # Follow the line and drive
-        difference = left_brightness - right_brightness if linetrack else 0
-
+        # Follow the line
         if db.distance() < start:
             db.drive(200, difference * 1.5)
         elif db.distance() > stretch:
@@ -96,40 +111,36 @@ def linetrack(
             db.drive(500, difference * 0.8)
 
 
-# remote.call("beacn", 67)
-
-while True:
-    db.turn(60)
-    db.turn(-120)
-    db.curve(130, 120)
-    db.curve(130, -120)
-    db.turn(60)
-    db.straight(-450)
+remote.call("beacn", 67)
 
 # Side quest 3
-# db.curve(99, 90)
-# linetrack("left", 50, 0, 219)
-# db.turn(-90)
-# while True:
-#     linetrack("right", 50, 0, 423)
-#     db.turn(90)
-#     linetrack("both", 50, 0, 407)
-#     db.straight(534)
-#     linetrack("both", 200, 0, 407)
-#     db.turn(-90)
-#     linetrack("right", 50, 0, 249)
-#     db.turn(90)
-#     linetrack("both", 50, 0, 295)
-#     db.turn(180)
-#     linetrack("left", 200, 0, 295)
-#     db.turn(-90)
-#     linetrack("right", 50, 0, 672)
-#     db.turn(90)
-#     linetrack("both", 50, 0, 674)
-#     db.turn(-90)
-#     linetrack("both", 50, 0, 97)
-#     db.turn(180)
-#     linetrack("both", 50, 0, 97)
-#     db.turn(-90)
-#     linetrack("right", 50, 0, 674)
-#     db.turn(90)
+db.curve(99, 90)
+linetrack("left", 50, 0, 221)
+db.turn(-90)
+while True:
+    linetrack("left", 50, 0, 664)
+    db.turn(-90)
+    linetrack("both", 50, 0, 407)
+    db.turn(180)
+    linetrack("right", 50, 0, 407)
+    db.turn(90)
+    linetrack("both", 50, 0, 664)
+    db.turn(-90)
+    linetrack("both", 50, 0, 674)
+    db.turn(-90)
+    linetrack("both", 50, 0, 181)
+    db.turn(180)
+    linetrack("both", 50, 0, 181)
+    db.turn(-90)
+    linetrack("both", 50, 0, 674)
+    db.turn(-90)
+    linetrack("both", 50, 0, 424)
+    db.turn(-90)
+    linetrack("both", 50, 0, 407)
+    db.turn(180)
+    linetrack("both", 50, 0, 407)
+    db.turn(90)
+    linetrack("right", 50, 0, 424)
+    db.turn(90)
+    linetrack("right", 50, 0, 1349)
+    db.turn(90)
