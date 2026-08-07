@@ -8,11 +8,12 @@ from pybricks.tools import StopWatch, wait
 
 from pupremote_hub import PUPRemoteHub
 
-BLACK_THRESHOLD = 40
-WHITE_THRESHOLD = 45
+BLACK_THRESHOLD = 60
+WHITE_THRESHOLD = 70
 LIGHT_SENSOR_Y = 58
 MAX_SPEED = 750
 ACCEL_DISTANCE = 300
+DECEL_DISTANCE = 200
 
 # Initialise hardware
 hub = PrimeHub()
@@ -20,10 +21,10 @@ left_motor = Motor(Port.F, positive_direction=Direction.COUNTERCLOCKWISE)
 right_motor = Motor(Port.D, positive_direction=Direction.CLOCKWISE)
 # right_motor.control.limits(1700, 10000, 800)
 # print(right_motor.control.limits())
-db = DriveBase(left_motor, right_motor, 62.4, 167)
+db = DriveBase(left_motor, right_motor, 62.4, 173)
 db.use_gyro(True)
 db.settings(
-    straight_speed=MAX_SPEED, straight_acceleration=1500, turn_rate=320, turn_acceleration=800
+    straight_speed=MAX_SPEED, straight_acceleration=1800, turn_rate=320, turn_acceleration=1200
 )
 print("db settings:", db.settings())
 
@@ -34,7 +35,8 @@ print("db settings:", db.settings())
 while True:
     try:
         remote = PUPRemoteHub(Port.B, max_packet_size=16)
-        remote.add_command("beacn", "b", "b")
+        remote.add_command("beacn", "", "B")
+        remote.add_command("cserv", "", "Bh")
         remote.add_channel("brigh", "BB")
         remote.call("beacn", 67, wait_ms=2)
         hub.speaker.beep(523)
@@ -69,7 +71,7 @@ def linetrack(
     while True:
         # Calculate some things
         detection_start = max(0, theoretical - LIGHT_SENSOR_Y - 50)
-        detection_end = theoretical - LIGHT_SENSOR_Y + 50
+        detection_end = theoretical * 1.05 - LIGHT_SENSOR_Y + 20
 
         # Receive brightness data, keeping the last readings if the link glitches
         try:
@@ -78,7 +80,7 @@ def linetrack(
             right_brightness = brightness_rx[1]
         except OSError:
             print("remote call failed")
-        print(left_brightness, right_brightness)
+        # print(left_brightness, right_brightness)
 
         # Detect junctions
         if junction_type == "left":
@@ -110,15 +112,28 @@ def linetrack(
 
         # Ramp up speed at the start, then ramp down speed before the end
         start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 500 + 250)
-        end_speed_cap = max(0, (detection_start - db.distance()) / ACCEL_DISTANCE * 500 + 250)
+        end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 500 + 250)
         speed = max(250, min(MAX_SPEED, start_speed_cap, end_speed_cap))
+        # Add 0.5 at start, ramp down
+        start_kp_boost = (1 - db.distance() / ACCEL_DISTANCE) * 0.5
+        start_kp_boost = max(0, start_kp_boost)
+        # Subtract 0.5 at end
+        end_kp_buck = (1 - (detection_start - db.distance()) / DECEL_DISTANCE) * 0.5
+        end_kp_buck = max(0, end_kp_buck)
+        kp = 0.5 + start_kp_boost - end_kp_buck
+        kp = max(0, kp)
         # Follow the line
-        kp = max(0.7, 1.4 - db.distance() / ACCEL_DISTANCE * 0.7)
         db.drive(speed, difference * kp)
 
+        # linetrack("both", 1349)
+        # stop
 
-# linetrack("both", 1349)
-# stop
+
+# while True:
+#     remote.call("cserv", 0, 0)
+#     wait(1000)
+#     remote.call("cserv", 0, 180)
+#     wait(1000)
 
 # Side quest 3
 db.curve(99, 90)

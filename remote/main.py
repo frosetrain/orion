@@ -4,14 +4,15 @@ import logging
 from time import sleep_ms, ticks_add, ticks_diff, ticks_ms
 
 import lpf2
-from machine import I2C, Pin
+from machine import I2C, PWM, Pin
 from neopixel import NeoPixel
 from pupremote import PUPRemoteSensor
 
 MUX_ADDRESS = 0x70
 selected_channel = None
+logging.basicConfig(format="%(chrono)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 def select_mux(i2c: I2C, channel: int) -> None:
@@ -218,14 +219,23 @@ class TCS3472:
         return min(255, clear // 4)
 
 
-def beacn(*_: list) -> int:
-    """Flash the NeoPixel red (like a beacon light)."""
-    global beacon_state, beacon_start_time
-    pixels[0] = (255, 255, 255)
-    pixels.write()
-    beacon_state = 0
-    beacon_start_time = ticks_ms()
-    return 67
+class Servo:
+    """Driver for a servo motor using PWM."""
+
+    def __init__(self, pwm: PWM) -> None:
+        """Init."""
+        self.pwm = pwm
+
+    def set_angle(self, angle: int) -> None:
+        """Move the servo motor using PWM.
+
+        Map angle (0-180) to duty cycle
+        Typical range: 0.5ms (0°) to 2.5ms (180°) pulse width
+        """
+        min_duty = 500_000  # 0.5 ms
+        max_duty = 2_500_000  # 2.5 ms
+        duty = int(min_duty + (angle / 180) * (max_duty - min_duty))
+        self.pwm.duty_ns(duty)
 
 
 def patched_connect(self: lpf2.LPF2) -> None:
@@ -291,6 +301,22 @@ def patched_connect(self: lpf2.LPF2) -> None:
         logger.error("Failed to connect to hub")
 
 
+def beacn(*_: None) -> None:
+    """Flash the NeoPixel like a beacon and strobe light."""
+    global beacon_state, beacon_start_time
+    pixels[0] = (255, 255, 255)
+    pixels.write()
+    beacon_state = 0
+    beacon_start_time = ticks_ms()
+
+
+def cserv(servo_num: int, angle: int) -> None:
+    """PUP command to control the servo."""
+    logger.info("Servo %s to %s deg", servo_num, angle)
+    servos[servo_num].set_angle(angle)
+
+
+# Override the built-in connect function with our patched version
 lpf2.LPF2.connect = patched_connect
 
 # Onboard NeoPixel
@@ -304,15 +330,23 @@ pixels.write()
 
 # TCS3472
 tcs_i2c = I2C(0, scl=Pin(4), sda=Pin(5), freq=400000)
-tcs_sensors = []
+tcs_line_sensors = []
 for i in range(2):
     tcs = TCS3472(tcs_i2c, mux_channel=i, integration_ms=2.4, gain=16)
-    tcs_sensors.append(tcs)
+    tcs_line_sensors.append(tcs)
+
+# Servo
+servos = []
+servo_pins = (22,)
+for pin in servo_pins:
+    servo_pwm = PWM(Pin(pin), freq=50)
+    servo = Servo(servo_pwm)
+    servos.append(servo)
 
 beacon_state = 67
 beacon_start_time = 0
 flash_pattern = [
-    (0, (255, 255, 50)),
+    (0, (255, 255, 255)),
     (50, (0, 0, 0)),
     (100, (255, 255, 255)),
     (150, (0, 0, 0)),
@@ -324,9 +358,11 @@ prev_connected = False
 # Connection to hub
 remote = PUPRemoteSensor(power=True, max_packet_size=16)
 # remote.lpup.debug = True
-remote.add_command("beacn", "b", "b")
+remote.add_command("beacn", "", "B")
+remote.add_command("cserv", "", "Bh")
 remote.add_channel("brigh", "BB")
 
+frame_count = 0
 while True:
     connected = remote.process()
     # Show black light when not connected to hub
@@ -350,16 +386,22 @@ while True:
             pixels[0] = flash_pattern[beacon_state][1]
             pixels.write()
     if ticks_diff(ticks_ms(), beacon_start_time) > 1000:
-        beacn()  # Restart the sequence
+        # Restart the sequence
+        pixels[0] = flash_pattern[0][1]
+        pixels.write()
+        beacon_state = 0
+        beacon_start_time += 1000  # Prevents gradual drifting
+        logger.debug("FPS: %s", frame_count)
+        frame_count = 0
 
     # distance = tofsense.get_distance()
-    # print(f"Distance: {distance} mm")
+    # logger.debug(f"Distance: {distance} mm")
 
-    brightnesses = [None for _ in range(2)]
-    for i, s in enumerate(tcs_sensors):
-        brightnesses[i] = s.clear_channel()
+    brightnesses = [-1 for _ in tcs_line_sensors]
+    for i, s in enumerate(tcs_line_sensors):
+        reading = s.clear_channel()
         if brightnesses[i] is not None:
-            # logger.debug(f"sens {i}: rgb {rgb[0]} {rgb[1]} {rgb[2]}")
+            brightnesses[i] = reading
             logger.debug("sens %s: %s", i, brightnesses[i])
         elif s.device_id is not None:
             # Exists but not sending data, because it was just reconnected. Reconfigure.
@@ -369,7 +411,9 @@ while True:
             logger.error("sens %s: gone", i)
 
     # Send -1 if reading is None
-    left_brightness = brightnesses[1] if brightnesses[1] is not None else -1
-    right_brightness = brightnesses[0] if brightnesses[0] is not None else -1
-    print("Sending brightnesses", left_brightness, right_brightness)
+    left_brightness = brightnesses[1]
+    right_brightness = brightnesses[0]
+    logger.debug("Sending brightnesses %s, %s", left_brightness, right_brightness)
     remote.update_channel("brigh", left_brightness, right_brightness)
+
+    frame_count += 1
