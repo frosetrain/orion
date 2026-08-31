@@ -193,9 +193,9 @@ class TCS3472:
         if not m["valid"] or clear == 0:
             return None
         return (
-            min(255, m["red"] * 255 // clear),
-            min(255, m["green"] * 255 // clear),
-            min(255, m["blue"] * 255 // clear),
+            min(255, m["red"]),  # // clear
+            min(255, m["green"]),
+            min(255, m["blue"]),  # * 255
         )
 
     def brightness(self) -> int | None:
@@ -246,9 +246,16 @@ def patched_connect(self: lpf2.LPF2) -> None:
     The hub pulses at 16 ms, right on the `n < 16` boundary, so the probe randomly
     picks the fast UART branch and then runs the handshake at 115200 against a hub
     still listening at 2400. Measure elapsed time with ticks_ms and leave margin.
+
+    Also returns early (without blocking) when the hub isn't driving the line at
+    all, so the main loop keeps running and the next process() call retries soon,
+    instead of blasting a handshake into silence and waiting 2.5 s for an ACK
+    that cannot come. That dead wait kept this side busy exactly when the hub
+    started probing, so the two sides kept missing each other's handshake windows.
     """
     assert len(self.modes) > 0, "No modes (commands) defined"  # noqa: S101
     fast_uart_hub = False
+    saw_hub_activity = False
     self.init_pins()
     self.wrt_tx_pin(1, 5)  # Say hello!
     self.wrt_tx_pin(0, 0)
@@ -260,13 +267,24 @@ def patched_connect(self: lpf2.LPF2) -> None:
             n = ticks_diff(ticks_ms(), start)
             if n > 20:
                 break
+        if self.rx_pin.value() == 0:
+            saw_hub_activity = True
         if self.debug:
             logger.debug("probe %s: falling after ms high: %s", attempt, n)
+        if attempt > 10 and not saw_hub_activity:
+            # Line never fell: the hub isn't probing this port right now.
+            logger.info("No hub activity (line idle high), aborting connect")
+            return
         if attempt > 10 and (n > 21 or n < 13):
             fast_uart_hub = True
             break
+        start = ticks_ms()
         while self.rx_pin.value() == 0:
             sleep_ms(1)  # Wait until rise again
+            if ticks_diff(ticks_ms(), start) > 50:
+                # Line stuck low (cable unplugged / floating); retry later
+                logger.info("Line stuck low, aborting connect")
+                return
 
     if fast_uart_hub:
         self.fast_uart()
@@ -286,7 +304,9 @@ def patched_connect(self: lpf2.LPF2) -> None:
         num -= 1
 
     self.write(b"\x04")  # ACK
-    end = ticks_add(ticks_ms(), 2500)
+    # The hub ACKs within milliseconds if it heard the handshake; a short
+    # timeout means a missed window is retried quickly instead of blocking.
+    end = ticks_add(ticks_ms(), 500)
     while ticks_diff(end, ticks_ms()) > 0:  # Wait for ack
         if self.readchar() == 0x04:  # BYTE_ACK
             self.connected = True
@@ -316,6 +336,24 @@ def cserv(servo_num: int, angle: int) -> None:
     servos[servo_num].set_angle(angle)
 
 
+def read_scanning_rgb() -> tuple[int, ...]:
+    """Read the RGB values from the scanning TCS sensors."""
+    rgbs = [(-1, -1, -1) for _ in scanning_tcs]
+    for i, s in enumerate(scanning_tcs):
+        rgb = s.rgb()
+        if rgb is not None:
+            rgbs[i] = rgb
+            logger.debug("sens %s: %s", i + 4, rgbs[i])  # Addresses start from 4
+        elif s.device_id is not None:
+            # Exists but not sending data, because it was just reconnected. Reconfigure.
+            logger.info("sens %s: reconnected, reconfiguring", i + 4)
+            s.configure()
+        else:
+            logger.error("sens %s: gone", i + 4)
+        # print("rgb", i, rgbs[i][0], rgbs[i][1], rgbs[i][2])
+    return sum(rgbs, ())  # Flatten rgbs into a 9-tuple
+
+
 # Override the built-in connect function with our patched version
 lpf2.LPF2.connect = patched_connect
 
@@ -330,10 +368,14 @@ pixels.write()
 
 # TCS3472
 tcs_i2c = I2C(0, scl=Pin(4), sda=Pin(5), freq=400000)
-tcs_line_sensors = []
+linetrack_tcs = []
 for i in range(2):
     tcs = TCS3472(tcs_i2c, mux_channel=i, integration_ms=2.4, gain=16)
-    tcs_line_sensors.append(tcs)
+    linetrack_tcs.append(tcs)
+scanning_tcs = []
+for i in (4, 5, 6):
+    tcs = TCS3472(tcs_i2c, mux_channel=i, integration_ms=2.4, gain=60)
+    scanning_tcs.append(tcs)
 
 # Servo
 servos = []
@@ -342,6 +384,13 @@ for pin in servo_pins:
     servo_pwm = PWM(Pin(pin), freq=50)
     servo = Servo(servo_pwm)
     servos.append(servo)
+
+remote_enable = True
+remote_disable_jumper = Pin(15, Pin.IN, Pin.PULL_DOWN)
+if remote_disable_jumper.value() == 1:
+    # Jumper between pin 15 and 3V3, disable connecting to SPIKE Prime
+    logger.warning("REMOTE TO SPIKE PRIME DISABLED")
+    remote_enable = False
 
 beacon_state = 67
 beacon_start_time = 0
@@ -355,16 +404,19 @@ flash_pattern = [
 ]
 prev_connected = False
 
-# Connection to hub
-remote = PUPRemoteSensor(power=True, max_packet_size=16)
-# remote.lpup.debug = True
-remote.add_command("beacn", "", "B")
-remote.add_command("cserv", "", "Bh")
-remote.add_channel("brigh", "BB")
+if remote_enable:
+    # Connection to hub
+    remote = PUPRemoteSensor(power=True, max_packet_size=16)
+    # remote.lpup.debug = True
+    remote.add_command("beacn", "", "B")
+    remote.add_command("cserv", "", "Bh")
+    remote.add_channel("brigh", "BB")
+    remote.add_channel("rgb", "9B")
 
 frame_count = 0
 while True:
-    connected = remote.process()
+    connected = remote.process() if remote_enable else True
+
     # Show black light when not connected to hub
     if prev_connected and not connected:
         pixels[0] = (0, 0, 0)
@@ -390,19 +442,23 @@ while True:
         pixels[0] = flash_pattern[0][1]
         pixels.write()
         beacon_state = 0
-        beacon_start_time += 1000  # Prevents gradual drifting
-        logger.debug("FPS: %s", frame_count)
+        beacon_start_time = ticks_add(beacon_start_time, 1000)  # Prevents gradual drifting
+        if ticks_diff(ticks_ms(), beacon_start_time) > 1000:
+            # Still over a second behind: the loop was blocked (e.g. inside
+            # connect()). Resync instead of replaying every missed second.
+            beacon_start_time = ticks_ms()
+        logger.info("FPS: %s", frame_count)
         frame_count = 0
 
     # distance = tofsense.get_distance()
     # logger.debug(f"Distance: {distance} mm")
 
-    brightnesses = [-1 for _ in tcs_line_sensors]
-    for i, s in enumerate(tcs_line_sensors):
-        reading = s.clear_channel()
-        if brightnesses[i] is not None:
-            brightnesses[i] = reading
-            logger.debug("sens %s: %s", i, brightnesses[i])
+    # Read TCS sensors
+    brightnesses = [-1 for _ in linetrack_tcs]
+    for i, s in enumerate(linetrack_tcs):
+        b = s.clear_channel()
+        if b is not None:
+            brightnesses[i] = b
         elif s.device_id is not None:
             # Exists but not sending data, because it was just reconnected. Reconfigure.
             logger.info("sens %s: reconnected, reconfiguring", i)
@@ -410,10 +466,15 @@ while True:
         else:
             logger.error("sens %s: gone", i)
 
-    # Send -1 if reading is None
-    left_brightness = brightnesses[1]
-    right_brightness = brightnesses[0]
+    # Send line sensor brightnesses (-1 if reading is None)
+    left_brightness = brightnesses[0]
+    right_brightness = brightnesses[1]
     logger.debug("Sending brightnesses %s, %s", left_brightness, right_brightness)
-    remote.update_channel("brigh", left_brightness, right_brightness)
+    if remote_enable:
+        remote.update_channel("brigh", left_brightness, right_brightness)
+        # Only read the scanning sensors while the hub has the rgb mode
+        # selected (during voting); skipping them keeps line-tracking FPS up.
+        if remote.lpup.current_mode == remote.modes["rgb"]:
+            remote.update_channel("rgb", *read_scanning_rgb())
 
     frame_count += 1

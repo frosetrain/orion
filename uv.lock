@@ -178,6 +178,8 @@ dependencies = [
     { name = "pupremote" },
     { name = "pybricks" },
     { name = "pybricksdev" },
+    { name = "pyglet" },
+    { name = "pyserial" },
     { name = "ruff" },
 ]
 
@@ -193,6 +195,8 @@ requires-dist = [
     { name = "pupremote", specifier = ">=2.1.2" },
     { name = "pybricks", specifier = ">=3.6.1" },
     { name = "pybricksdev", specifier = ">=2.3.2" },
+    { name = "pyglet", specifier = ">=2.1.16" },
+    { name = "pyserial", specifier = ">=3.5" },
     { name = "ruff", specifier = ">=0.15.11" },
 ]
 provides-extras = ["stubs"]
@@ -269,6 +273,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/54/a9/8efa1d7c7ad7d2a8306a7dcf146b13b527a6232ec9f81cad28a895de18c4/pybricksdev-2.3.2.tar.gz", hash = "sha256:7c060ce60dbdde96fb6544dfbcd8cd51dcb2d4d7d5cd5796dd79c40f0287e765", size = 238700, upload-time = "2026-01-24T03:47:32.135Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/84/7ba3b51300818266b7ffd03c7170572b8f1c9d9f46978e929da7c8d7d00b/pybricksdev-2.3.2-py3-none-any.whl", hash = "sha256:7d9f024931c412e7e5e3578f1dd811ba4449519d85706a7e36611d4a27de4acc", size = 257505, upload-time = "2026-01-24T03:47:33.121Z" },
+]
+
+[[package]]
+name = "pyglet"
+version = "2.1.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/af/72a0c4fc95339ec590f441a591143e04acb27b2c94845735809c1630ade6/pyglet-2.1.16.tar.gz", hash = "sha256:ca90ee05532ced8330b8a8087ac2a7b69589b7fa7fb67f85aabe24aaf4ae42c0", size = 6598246, upload-time = "2026-08-01T01:32:35.895Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/93/b81e304f8954876fed84c5afffe83d2c1c0ceed064d5003b87fbfe9f9076/pyglet-2.1.16-py3-none-any.whl", hash = "sha256:27f9cabf97a64b15d335cf70d9e8979bbab5f84a9900a058206bcd3a2de341ae", size = 1037857, upload-time = "2026-08-01T01:32:30.566Z" },
 ]
 
 [[package]]
