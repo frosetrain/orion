@@ -57,6 +57,37 @@ fps_timer = StopWatch()
 arm_motor.control.limits(2000, 5000, 263)
 claw_motor.control.limits(2000, 2000, 320)
 
+# Since we grab tiles twice, we have to keep track of which ones are left over from the first grab
+available_stock = [list(range(6)) for i in range(4)]  # Oh no, global state!
+
+
+def rgb_to_hsv(rgb: tuple[int, int, int]):
+    # Normalize RGB values to the range [0, 1]
+    r, g, b = (x / 255 for x in rgb)
+
+    max_val = max(r, g, b)
+    min_val = min(r, g, b)
+    diff = max_val - min_val
+
+    # Value (Brightness)
+    v = max_val
+
+    # Saturation
+    s = 0.0 if max_val == 0 else diff / max_val
+
+    # Hue
+    if diff == 0:
+        h = 0.0
+    elif max_val == r:
+        h = (60 * ((g - b) / diff) + 360) % 360
+    elif max_val == g:
+        h = (60 * ((b - r) / diff) + 120) % 360
+    elif max_val == b:
+        h = (60 * ((r - g) / diff) + 240) % 360
+
+    # Return H in [0, 360], S and V in [0, 1] (or scale as needed)
+    return h, s, v
+
 
 def arm_up() -> None:
     """Move arm up (currently assuming it starts from grabbing height)."""
@@ -97,6 +128,7 @@ def cage_down() -> None:
 
 
 def starting_to_middle() -> None:
+    """Leave the starting area and line track to the middle junction."""
     db.curve(158, 90)
     linetrack("both", 824)
 
@@ -104,19 +136,19 @@ def starting_to_middle() -> None:
 def linetrack(
     junction_type: str,
     theoretical: int,
-    sensor: str = "both",
     *,
+    sensor: str = "both",
     move_forward: bool = True,
-    linetrack: bool = True,
+    follow_line: bool = True,
 ) -> None:
     """Line track.
 
     Args:
-        junction_type (str): Left, both, right or distance.
-        theoretical (int): The theoretical distance to line track.
-        sensor (str): Line track using left, right or both sensors.
-        move_forward (bool): Whether to go forward to get axle on the line. Defaults to True.
-        linetrack (bool): Whether to linetrack. Defaults to True.
+        junction_type: Left, both, right or distance.
+        theoretical: The theoretical distance to line track.
+        sensor: Line track using left, right or both sensors. Defaults to both.
+        move_forward: Whether to go forward to get axle on the line. Defaults to True.
+        follow_line: Whether to linetrack. Defaults to True.
 
     """
     db.reset()
@@ -124,8 +156,6 @@ def linetrack(
     right_brightness = -1
     fps_timer.reset()
     frame_count = 0
-    integral = 0
-    p_difference = 0
 
     while True:
         # Calculate some things
@@ -159,7 +189,7 @@ def linetrack(
             # Ignore light sensor readings for junction detection, instead use distance
             hit = db.distance() >= theoretical
         else:
-            if not linetrack:
+            if not follow_line:
                 difference = 0
             elif sensor == "left":
                 difference = 50 - left_brightness
@@ -191,29 +221,11 @@ def linetrack(
         start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 300 + 200)
         end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 300 + 200)
         speed = max(200, min(MAX_SPEED, start_speed_cap, end_speed_cap))
-        # speed = 500
-        # Add 0.5 at start, ramp down
-        # start_kp_boost = (1 - db.distance() / ACCEL_DISTANCE) * 0.5
-        # start_kp_boost = max(0, start_kp_boost)
-        # # Subtract 0.5 at end
-        # end_kp_buck = (1 - (detection_start - db.distance()) / DECEL_DISTANCE) * 0.5
-        # end_kp_buck = max(0, end_kp_buck)
-        # kp = 0.7 + start_kp_boost - end_kp_buck
-        # kp = max(0, kp)
-        kp = speed * 0.002
-        # difference = min(difference, 100)
-        # difference = max(difference, -100)
-        # kp = 0.3  # 0.8
-        # integral += difference * 0.01
-        # integral = max(-25, min(25, integral))
-        # kp *= 1.4
-        d = difference - p_difference
-        # Follow the line
-        # db.drive(speed, difference * kp + integral + d * 0.3)
 
-        # dc version
+        # DC version
         base = speed / 5  # 100% DC is ~500mm/s speed
-        correction = abs(difference) * 0.4
+        kp = 0.4 if sensor == "both" else 1.0
+        correction = abs(difference) * kp
         if difference < 0:
             left_motor.dc(base - correction)
             right_motor.dc(base)
@@ -227,45 +239,20 @@ def linetrack(
             fps_timer.reset()
             frame_count = 0
 
-        # wait(8)
-
-
-def one_sensor_linetrack(speed: int) -> None:
-    """Track the right side of the line using the left sensor."""
-    db.reset()
-    left_brightness = 50
-
-    while True:
-        if db.distance() > 1000:
-            db.stop()
-            break
-
-        try:
-            brightness_rx = remote.call("brigh")
-            left_brightness = brightness_rx[0]
-            right_brightness = brightness_rx[1]
-        except OSError:
-            print("remote call failed")
-
-        difference = 50 - left_brightness
-        base = speed / 5  # 100% DC is ~500mm/s speed
-        correction = abs(difference) * 0.8
-        if difference < 0:
-            left_motor.dc(base - correction)
-            right_motor.dc(base)
-        else:
-            left_motor.dc(base)
-            right_motor.dc(base - correction)
-
 
 def voting() -> list[int]:
     """Scan the mosaic (from the side, 2 rows only). Starts from line sensors on the junction.
 
     Returns:
-        List of mosaic colours in each slot.
+        List of mosaic colors in each slot.
         From the perspective of the robot, list indices are
-        1 3 5
-        0 2 4
+            1 3 5
+            0 2 4
+        Enumerated colors are
+            0: Yellow
+            1: Green
+            2: Blue
+            3: White
 
     """
     db.reset()
@@ -283,16 +270,16 @@ def voting() -> list[int]:
     # TODO: tune
 
     for row in range(2):
-        print("Start row", row)
+        # print("Start row", row)
 
         # Drive to the start of the slot (accounting for window)
         while db.distance() < slot_distances[row][0] + 10:
             db.drive(100, 0)
-        print("    Start of window")
+        # print("    Start of window")
         # db.straight(0)
         # wait(1000)
 
-        # Collect ambient values until the end of the window
+        # Collect RGB values until the end of the window
         reading_count = 0
         tallies = [[0, 0, 0] for _ in range(3)]
         while db.distance() < slot_distances[row][1] - 10:
@@ -318,58 +305,139 @@ def voting() -> list[int]:
                 tallies[sensor][2] // reading_count,
             )
             average_colors[sensor * 2 + row] = avg_rgb
-        print("    End of window")
+        # print("    End of window")
         # db.straight(0)
         # wait(1000)
 
     db.straight(0)
     out = []
     for slot in range(6):
-        out.append(67)
-    print(average_colors)
+        h, s, v = rgb_to_hsv(average_colors[slot])
+        if v > 0.67:
+            # White or yellow
+            if s > 0.35:
+                out.append(0)  # Yellow
+            else:
+                out.append(3)  # White
+        else:
+            # Green or blue
+            if h > 150:
+                out.append(2)  # Blue
+            else:
+                out.append(1)  # Green
+    print("average_colors", average_colors)
+    print("detected", out)
     return out
 
 
-def collect(side: str, num: int) -> None:
-    """Collect blocks, starting with the robot on the junction to the colour zone.
+def collect(channel: str, num: int) -> None:
+    """Collect blocks, starting with the robot on the junction to the color zone.
 
     Args:
-        side (str): The side of the junction.
-        num (int): 1 -> collect first one only
-                   2 -> collect both first and second (or second only)
-                   3 -> collect both second and third (or third only)
+        channel: The channel to collect into: left, claw or right.
+        num: 1 -> collect first one only
+             2 -> collect both first and second (or second only)
+             3 -> collect both second and third (or third only)
 
     """
-    if side == "left":
-        turn_direction = -1
-    elif side == "right":
-        turn_direction = 1
+    if channel == "left":
+        channel_polarity = -1
+    elif channel == "right":
+        channel_polarity = 1
+    elif channel == "claw":
+        channel_polarity = 0
     else:
         raise ValueError
 
-    db.straight(44 * turn_direction)
-    db.turn(-90)
+    # db.straight(44 * side_polarity)
+    # db.turn(-90)
     arm_down()
     db.straight(-8 + 64 * num)  # 120 for both
     claw_close()
-    db.straight(-22 - 64 * num)
-    claw_open()
-    arm_up()
-    claw_close()
-    db.straight(-100)
-    db.turn(-9 * turn_direction)
-    cage_down()
-    db.straight(180)
-    cage_up()
-    db.turn(9 * turn_direction)
-    db.straight(-45)
-    db.turn(90)
-    db.straight(-12 * turn_direction)
-    claw_open()
+    if channel != "claw":
+        db.straight(-22 - 64 * num)
+        claw_open()
+        arm_up()
+        claw_close()
+        db.straight(-100)
+        db.turn(-9 * channel_polarity)
+        cage_down()
+        db.straight(180)
+        cage_up()
+        db.turn(9 * channel_polarity)
+        db.straight(-45)
+        claw_open()
+    else:
+        db.straight(8 - 64 * num)
+    # db.turn(90)
+    # db.straight(-12 * side_polarity)
+
+
+def grab_seq_algo(mosaic_colors: tuple[int, ...]) -> list[tuple[int, int]]:
+    """Greedy algorithm to calculate the order of grabs.
+
+    Args:
+        mosaic_colors: See the return type of voting().
+
+    Returns:
+        A list of grabs. Each grabs is a tuple of (color, channel).
+
+    """
+    grabs = []
+    mosaic_tile_ids = [0, 2, 4]  # For each channel, put this in before 1, 3 or 5
+    current_zone = 3  # Assume we start at white zone
+    for _ in range(6):  # 6 grabs in total
+        best_dist = 6767  # Closest distance
+        best_color = -1
+        best_channel = -1
+        best_mosaic_tid = -1
+        # For each color's tile grab zone
+        for channel, mosaic_tid in enumerate(mosaic_tile_ids):
+            if mosaic_tid == -1:
+                # Channel is done already
+                continue
+            color = mosaic_colors[mosaic_tid]
+            dist = abs(color - current_zone)
+            if dist < best_dist or (dist == best_dist and color > current_zone):
+                # Prefer going North
+                best_dist = dist
+                best_color = color
+                best_channel = channel
+                best_mosaic_tid = mosaic_tid
+        # We now have the best one to grab and where it should go
+        print(best_color, best_channel)
+        grabs.append((best_color, best_channel))
+        if best_mosaic_tid % 2 == 0:
+            # If we grab the first one, the one behind can be grabbed in future
+            mosaic_tile_ids[best_channel] += 1
+        else:
+            mosaic_tile_ids[best_channel] = -1
+        current_zone = best_color
+    return grabs
+
+
+def grab_mvt_algo(seq: list[tuple[int, int]]) -> None:
+    """Calculate the actual grab movements, i.e. calls to `collect()`."""
+    # For each of the 4 colors of grabbable tiles, all 6 are available at first
+    global available_stock
+    grabs = []  # Color, side, channel, num (how deep to go); see collect() args
+    for tile in seq:
+        if grabs and grabs[-1][0] == tile[0] and grabs[-1][2] == tile[1] and grabs[-1][3] < 3:
+            # 1. New grab color == previous color
+            # 2. Both in same channel
+            # 3. Previous grab is not the back-most one (3rd row)
+            print("-> grab two at the same time")
+            grabs[-1][3] += 1  # Now this grab grabs both -> go one layer deeper than prev
+            grab_tid = (grabs[-1][3] - 1) * 2 + grabs[-1][1]
+            available_stock[grabs[-1][0]].remove(grab_tid)
+            continue  # No need to add a new grab
+        grab_tid = min(available_stock[tile[0]])  # Smallest tid in this color's zone
+        grabs.append([tile[0], grab_tid % 2, tile[1], grab_tid // 2 + 1])
+        available_stock[tile[0]].remove(grab_tid)
+    print(grabs)
 
 
 def linetrack_test() -> None:
-    """Line tracking test thing."""
     starting_to_middle()
     db.turn(-90)
     while True:
@@ -402,7 +470,6 @@ def linetrack_test() -> None:
 
 
 def lightsensor_test() -> None:
-    """hi."""
     while True:
         try:
             brightness_rx = remote.call("brigh")
@@ -461,11 +528,13 @@ def collecttest() -> None:
     linetrack("right", 674)
     db.turn(90)
     linetrack("left", 344)
-    collect("left", 2)
-    collect("right", 1)
+    collect("left", "left", 2)
+    collect("left", "right", 1)
+    collect("right", "right", 1)
 
 
 def main() -> None:
+    """Execute the main mission."""
     # starting_to_middle()
     # db.turn(90)
     # arm_down()
@@ -483,13 +552,13 @@ def main() -> None:
     # db.turn(90)
     # linetrack("both", 202)
     # db.turn(-90)
-    # linetrack("both", 408, move_forward=False)
-    # claw_open()  # second time
-    # arm_down()
-    # voting()
-    # arm_up()
-    # db.straight(-458)  # TODO: not magic
-    # db.turn(-90)
+    linetrack("both", 408, move_forward=False)
+    claw_open()  # second time
+    arm_down()
+    mosaic_colors = voting()
+    arm_up()
+    db.straight(-458)  # TODO: not magic
+    db.turn(-90)
     linetrack("right", 404)
     db.straight(120)
     db.turn(90)
@@ -512,13 +581,23 @@ def main() -> None:
     db.turn(110)
     db.straight(140)
     db.turn(-20)
+    linetrack("left", 664)  # Mandatory track until the end for alignment
+    collect("left", "left", 2)
+    db.turn(180)
+    linetrack("right", 160)
+    db.turn(180)  # TODO: how to make this composable while avoiding unnecessary movements
+    collect("left", "right", 1)
+    collect("right", "right", 1)
+    db.turn(180)
+    linetrack("right", 160 * 2)
+    collect("left", "claw", 2)
 
 
 if __name__ == "__main__":
-    # main()
+    main()
     # collecttest()
     # linetrack("both", 408, move_forward=False)
-    one_sensor_linetrack(500)
+    # linetrack("distance", 800, sensor="left")
     # voting()
     # linetrack_test()
     # lightsensor_test()
