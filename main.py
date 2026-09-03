@@ -9,6 +9,8 @@ from pybricks.tools import StopWatch, wait
 
 from pupremote_hub import PUPRemoteHub
 
+WHEEL_DIAMETER = 62.4
+AXLE_TRACK = 167
 LEFT_WHITE = 88
 RIGHT_WHITE = 100
 BLACK_THRESHOLD = 30
@@ -25,7 +27,7 @@ right_motor = Motor(Port.B, positive_direction=Direction.CLOCKWISE)
 arm_motor = Motor(Port.F, positive_direction=Direction.CLOCKWISE)
 claw_motor = Motor(Port.E, positive_direction=Direction.COUNTERCLOCKWISE)
 cage_motor = Motor(Port.A, positive_direction=Direction.CLOCKWISE)
-db = DriveBase(left_motor, right_motor, 62.4, 167)
+db = DriveBase(left_motor, right_motor, WHEEL_DIAMETER, AXLE_TRACK)
 db.use_gyro(True)
 db.settings(
     straight_speed=MAX_SPEED, straight_acceleration=1000, turn_rate=300, turn_acceleration=600
@@ -46,6 +48,7 @@ while True:
         remote.add_command("cserv", "", "Bh")
         remote.add_channel("brigh", "BB")
         remote.add_channel("rgb", "9B")
+        # remote.add_channel("dist", "hh")
         remote.call("beacn", 67, wait_ms=2)
         hub.speaker.beep(523)
         break
@@ -89,27 +92,30 @@ def rgb_to_hsv(rgb: tuple[int, int, int]):
     return h, s, v
 
 
+def turn(angle) -> None:
+    db.turn(angle)
+
+
 def arm_up() -> None:
     """Move arm up (currently assuming it starts from grabbing height)."""
     arm_motor.run_angle(1000, 180)
     arm_motor.run_until_stalled(1000, duty_limit=50)  # Remove this line to disable aligning
 
 
-def arm_down() -> None:
+def arm_down(*, absolute=False) -> None:
     """Move arm down (currently to the correct height for grabbing)."""
-    # arm_motor.run_angle(500, -280)  # Go down without aligning (aligning is done when going up)
-
-    arm_motor.run_angle(1000, -130, then=Stop.NONE)  # Quickly go down
-    arm_motor.run_until_stalled(-300, duty_limit=20)  # Slow down just before hitting ground
-    # This results in a gentle bonk on the ground
-    # dispensing might need to go up 60 deg
-    arm_motor.run_angle(1000, 67)
-    # wait(1000)
+    if absolute:
+        arm_motor.run_target(1000, 0)
+    else:
+        arm_motor.run_angle(1000, -130, then=Stop.NONE)  # Quickly go down
+        arm_motor.run_until_stalled(-300, duty_limit=20)  # Slow down just before hitting ground
+        arm_motor.run_angle(1000, 67)
 
 
-def claw_open() -> None:
+def claw_open(stage: int = 0) -> None:
     """Open the claw."""
-    claw_motor.run_angle(1000, 90)
+    stages = [80, 120, 240]
+    claw_motor.run_target(1000, stages[stage])
 
 
 def claw_close() -> None:
@@ -144,7 +150,7 @@ def linetrack(
     """Line track.
 
     Args:
-        junction_type: Left, both, right or distance.
+        junction_type: Left, both, right, blue or distance.
         theoretical: The theoretical distance to line track.
         sensor: Line track using left, right or both sensors. Defaults to both.
         move_forward: Whether to go forward to get axle on the line. Defaults to True.
@@ -178,6 +184,8 @@ def linetrack(
             hit = left_brightness < BLACK_THRESHOLD and right_brightness < BLACK_THRESHOLD
         elif junction_type == "right":
             hit = left_brightness > WHITE_THRESHOLD and right_brightness < BLACK_THRESHOLD
+        elif junction_type == "blue":  # Looser threshold for detecting blue box
+            hit = left_brightness < 50 and right_brightness < 50
         elif junction_type == "distance":
             hit = db.distance() >= theoretical - LIGHT_SENSOR_Y
         else:
@@ -224,7 +232,7 @@ def linetrack(
 
         # DC version
         base = speed / 5  # 100% DC is ~500mm/s speed
-        kp = 0.4 if sensor == "both" else 1.0
+        kp = 0.6 if sensor == "both" else 0.8
         correction = abs(difference) * kp
         if difference < 0:
             left_motor.dc(base - correction)
@@ -330,63 +338,22 @@ def voting() -> list[int]:
     return out
 
 
-def collect(channel: str, num: int) -> None:
-    """Collect blocks, starting with the robot on the junction to the color zone.
-
-    Args:
-        channel: The channel to collect into: left, claw or right.
-        num: 1 -> collect first one only
-             2 -> collect both first and second (or second only)
-             3 -> collect both second and third (or third only)
-
-    """
-    if channel == "left":
-        channel_polarity = -1
-    elif channel == "right":
-        channel_polarity = 1
-    elif channel == "claw":
-        channel_polarity = 0
-    else:
-        raise ValueError
-
-    # db.straight(44 * side_polarity)
-    # db.turn(-90)
-    arm_down()
-    db.straight(-8 + 64 * num)  # 120 for both
-    claw_close()
-    if channel != "claw":
-        db.straight(-22 - 64 * num)
-        claw_open()
-        arm_up()
-        claw_close()
-        db.straight(-100)
-        db.turn(-9 * channel_polarity)
-        cage_down()
-        db.straight(180)
-        cage_up()
-        db.turn(9 * channel_polarity)
-        db.straight(-45)
-        claw_open()
-    else:
-        db.straight(8 - 64 * num)
-    # db.turn(90)
-    # db.straight(-12 * side_polarity)
-
-
 def grab_seq_algo(mosaic_colors: tuple[int, ...]) -> list[tuple[int, int]]:
     """Greedy algorithm to calculate the order of grabs.
 
     Args:
-        mosaic_colors: See the return type of voting().
+        mosaic_colors: See the return type of `voting`.
 
     Returns:
-        A list of grabs. Each grabs is a tuple of (color, channel).
+        A list of grabs. Each grab is a tuple of (color, channel).
 
     """
     grabs = []
     mosaic_tile_ids = [0, 2, 4]  # For each channel, put this in before 1, 3 or 5
-    current_zone = 3  # Assume we start at white zone
-    for _ in range(6):  # 6 grabs in total
+    current_color = 3  # Assume we start at white zone
+    # If both middle tiles are the same color, grab them together in one claw grab at the end
+    middle_pair = mosaic_colors[2] == mosaic_colors[3]
+    for i in range(6):  # 6 grabs in total
         best_dist = 6767  # Closest distance
         best_color = -1
         best_channel = -1
@@ -396,9 +363,15 @@ def grab_seq_algo(mosaic_colors: tuple[int, ...]) -> list[tuple[int, int]]:
             if mosaic_tid == -1:
                 # Channel is done already
                 continue
+            if mosaic_tid == 3 and i < 5:
+                # Don't grab tid 3 yet! It must be last.
+                continue
+            if middle_pair and mosaic_tid == 2 and i < 4:
+                # Hold tid 2 back so it is grabbed right before tid 3 and merged with it
+                continue
             color = mosaic_colors[mosaic_tid]
-            dist = abs(color - current_zone)
-            if dist < best_dist or (dist == best_dist and color > current_zone):
+            dist = abs(color - current_color)
+            if dist < best_dist or (dist == best_dist and color > current_color):
                 # Prefer going North
                 best_dist = dist
                 best_color = color
@@ -412,61 +385,183 @@ def grab_seq_algo(mosaic_colors: tuple[int, ...]) -> list[tuple[int, int]]:
             mosaic_tile_ids[best_channel] += 1
         else:
             mosaic_tile_ids[best_channel] = -1
-        current_zone = best_color
+        current_color = best_color
     return grabs
 
 
-def grab_mvt_algo(seq: list[tuple[int, int]]) -> None:
-    """Calculate the actual grab movements, i.e. calls to `collect()`."""
+def grab_mvt_algo(seq: list[tuple[int, int]]) -> list[list[int]]:
+    """Calculate the actual grab movements, i.e. calls to `collect`.
+
+    Args:
+        seq: See the return type of `grab_seq_algo`.
+
+    Returns:
+        A list of actual grab movements. Each is a list of [color, side, channel, num].
+        Num is how deep to go (see the args of `grab_one`).
+
+    """
     # For each of the 4 colors of grabbable tiles, all 6 are available at first
     global available_stock
-    grabs = []  # Color, side, channel, num (how deep to go); see collect() args
+    grabs = []
     for tile in seq:
-        if grabs and grabs[-1][0] == tile[0] and grabs[-1][2] == tile[1] and grabs[-1][3] < 3:
-            # 1. New grab color == previous color
-            # 2. Both in same channel
-            # 3. Previous grab is not the back-most one (3rd row)
-            print("-> grab two at the same time")
-            grabs[-1][3] += 1  # Now this grab grabs both -> go one layer deeper than prev
-            grab_tid = (grabs[-1][3] - 1) * 2 + grabs[-1][1]
-            available_stock[grabs[-1][0]].remove(grab_tid)
-            continue  # No need to add a new grab
-        grab_tid = min(available_stock[tile[0]])  # Smallest tid in this color's zone
-        grabs.append([tile[0], grab_tid % 2, tile[1], grab_tid // 2 + 1])
-        available_stock[tile[0]].remove(grab_tid)
+        t_color, t_channel = tile
+        if grabs:  # Avoid index out of range
+            p_color, p_side, p_channel, p_num = grabs[-1]
+            if p_color == t_color and p_channel == t_channel and p_num < 3:
+                # 1. New grab color == previous color
+                # 2. Both in same channel
+                # 3. Previous grab is not the back-most one (3rd row)
+                print("-> grab two at the same time")
+                grabs[-1][3] += 1  # Now this grab grabs both -> go one layer deeper than prev
+                grab_tid = p_num * 2 + p_side  # The tile directly behind the previous one
+                available_stock[p_color].remove(grab_tid)
+                continue  # No need to add a new grab
+        grab_tid = min(available_stock[t_color])  # Smallest tid in this color's zone
+        grabs.append([t_color, grab_tid % 2, t_channel, grab_tid // 2 + 1])
+        available_stock[t_color].remove(grab_tid)
     print(grabs)
+    return grabs
+
+
+def grab_one(channel: int, num: int) -> None:
+    """Collect one grab, starting on the line and facing the tiles.
+
+    Args:
+        channel: The channel to collect into: 0 (left), 1 (middle), 2 (right) or 3 (claw).
+        num: 1 -> collect first one only
+             2 -> collect both first and second (or second only)
+             3 -> collect both second and third (or third only)
+
+    """
+    print(f"Grabbing into {channel}, num {num}")
+    # TODO: middle channel back is channel, front is claw
+    channel_polarity = channel - 1  # -1, 0 or 1
+
+    arm_down(absolute=True)
+    claw_open()
+    db.straight(64 * num)  # 120 for both
+    claw_close()
+    if channel == 3:
+        # Claw
+        db.straight(8 - 64 * num)
+    elif channel == 1:
+        # Middle channel
+        db.straight(-20 - 64 * num)
+        claw_open(2)
+        arm_up()
+        cage_down()
+        db.straight(80)
+        cage_up()
+        arm_down(absolute=True)
+        db.straight(-94)
+    else:
+        # Either of the side channels
+        db.straight(-20 - 64 * num)
+        claw_open(2)
+        db.straight(-50)
+        arm_up()
+        turn(-12 * channel_polarity)
+        cage_down()
+        db.straight(160)
+        cage_up()
+        arm_down(absolute=True)
+        db.straight(-100)
+        turn(12 * channel_polarity)
+
+
+def grab(grabs: list[list[int]]) -> None:
+    """Grab the correct tiles for one side of the mosaic (6 tiles).
+
+    The robot starts on the junction to white zone.
+    """
+    current_color = 3
+    current_side = 0
+    # CLAW RESET PROC.
+    claw_close()
+    claw_motor.reset_angle(0)
+    claw_open()
+    # ARM RESET PROC.
+    arm_down()
+    arm_motor.reset_angle(0)
+
+    for i, g in enumerate(grabs):
+        g_color, g_side, g_channel, g_num = g
+        print(f"Move to color {g_color}, side {g_side}")
+        if g_color == current_color:
+            if g_side < current_side:
+                turn(90)
+                db.straight(88)
+                turn(-90)
+            elif g_side > current_side:
+                turn(-90)
+                db.straight(88)
+                turn(90)
+            # else do nothing - we are already in the correct place
+        else:
+            # move!
+            if g_color > current_color:
+                print("linetrack riughtwarrd")
+                turn(90)
+                linetrack(
+                    "left",
+                    (g_color - current_color) * 160 + (44 if current_side == 1 else -44),
+                    move_forward=False,
+                )
+                # wait(1000)
+                db.straight(LIGHT_SENSOR_Y + (44 if g_side == 0 else -44))
+                turn(-90)
+            elif g_color < current_color:
+                print("linetrack lefthwuduaw")
+                turn(-90)
+                linetrack(
+                    "right",
+                    (current_color - g_color) * 160 + (44 if current_side == 0 else -44),
+                    move_forward=False,
+                )
+                # wait(1000)
+                db.straight(LIGHT_SENSOR_Y + (44 if g_side == 1 else -44))
+                turn(90)
+
+        if g_channel == 1 and i == len(grabs) - 1:
+            # Last grab is always with the claw
+            grab_one(3, g_num)
+        else:
+            grab_one(g_channel, g_num)
+        current_color = g_color
+        current_side = g_side
+        # wait(2000)
 
 
 def linetrack_test() -> None:
     starting_to_middle()
-    db.turn(-90)
+    turn(-90)
     while True:
         linetrack("left", 664)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 198)
-        db.turn(180)
+        turn(180)
         linetrack("right", 198)
-        db.turn(90)
+        turn(90)
         linetrack("both", 664)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 674)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 181)
-        db.turn(180)
+        turn(180)
         linetrack("both", 181)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 674)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 424)
-        db.turn(-90)
+        turn(-90)
         linetrack("both", 407)
-        db.turn(180)
+        turn(180)
         linetrack("both", 407)
-        db.turn(90)
+        turn(90)
         linetrack("right", 424)
-        db.turn(90)
+        turn(90)
         linetrack("right", 1349)
-        db.turn(90)
+        turn(90)
 
 
 def lightsensor_test() -> None:
@@ -487,7 +582,7 @@ def deposittest() -> None:
     arm_up()
     linetrack("both", 407, move_forward=False)
     arm_down()
-    claw_open()
+    claw_open(1)
     arm_up()
     cage_down()
     db.straight(85)
@@ -501,13 +596,13 @@ def deposittest() -> None:
     db.straight(100)
     arm_down()
     arm_motor.run_angle(1000, 40)  # drop from a bit higher
-    claw_open()
+    claw_open(1)
     arm_up()
 
 
 def cagesmashtesst() -> None:
     starting_to_middle()
-    db.turn(90)
+    turn(90)
     cage_motor.run_angle(500, -120)
     db.straight(-260)
     while True:
@@ -515,87 +610,119 @@ def cagesmashtesst() -> None:
         # db.straight(-15)
         # db.straight(30)
         # db.straight(-15)
-        # db.turn(10)
-        # db.turn(-20)
-        # db.turn(10)
+        # turn(10)
+        # turn(-20)
+        # turn(10)
         cage_up()
         db.straight(-3)
 
 
 def collecttest() -> None:
     starting_to_middle()
-    db.turn(180)
+    turn(180)
     linetrack("right", 674)
-    db.turn(90)
+    turn(90)
     linetrack("left", 344)
-    collect("left", "left", 2)
-    collect("left", "right", 1)
-    collect("right", "right", 1)
+    grab_one("left", "left", 2)
+    grab_one("left", "right", 1)
+    grab_one("right", "right", 1)
+
+
+def cheese() -> None:
+    # # CLAW RESET PROC.
+    claw_close()
+    claw_motor.reset_angle(0)
+    claw_open(2)
+    # ARM RESET PROC.
+    arm_down()
+    arm_motor.reset_angle(0)
+    arm_motor.run_target(1000, 40)
+    db.straight(200)
+    db.straight(-10)
+    claw_close()
+    claw_open(2)
+    db.straight(20)
+    claw_close()
+    db.straight(-60)
+    turn(90)
+    db.straight(100)
+    linetrack("both", 900)
+    arm_up()
 
 
 def main() -> None:
     """Execute the main mission."""
     # starting_to_middle()
-    # db.turn(90)
+    # turn(90)
+    # claw_open(1)
     # arm_down()
     # arm_motor.run_angle(1000, 40)
     # claw_close()
     # arm_up()
-    # db.turn(-90)
+    # turn(-90)
     # linetrack("both", 675)
-    # db.turn(-90)
+    # turn(-90)
     # linetrack("distance", 202)
-    # db.turn(-90)
+    # turn(-90)
     # arm_down()
     # claw_open()
     # arm_up()
-    # db.turn(90)
+    # turn(90)
     # linetrack("both", 202)
-    # db.turn(-90)
-    linetrack("both", 408, move_forward=False)
-    claw_open()  # second time
-    arm_down()
-    mosaic_colors = voting()
-    arm_up()
-    db.straight(-458)  # TODO: not magic
-    db.turn(-90)
-    linetrack("right", 404)
-    db.straight(120)
-    db.turn(90)
-    cage_motor.run_angle(1000, -90)
-    db.straight(300)
-    cage_up()
-    db.turn(30)
-    db.straight(120)
-    db.turn(-30)
-    db.straight(1150)
-    cage_down()
-    db.straight(-100)
-    cage_motor.run_angle(1000, 45)
-    db.turn(7)
-    db.straight(-320)
-    cage_down()
-    db.turn(-7)
-    db.straight(280)
-    cage_up()
-    db.turn(110)
-    db.straight(140)
-    db.turn(-20)
-    linetrack("left", 664)  # Mandatory track until the end for alignment
-    collect("left", "left", 2)
-    db.turn(180)
-    linetrack("right", 160)
-    db.turn(180)  # TODO: how to make this composable while avoiding unnecessary movements
-    collect("left", "right", 1)
-    collect("right", "right", 1)
-    db.turn(180)
-    linetrack("right", 160 * 2)
-    collect("left", "claw", 2)
+    # turn(-90)
+    # linetrack("both", 408, move_forward=False)
+    # claw_open(2)  # flat
+    # arm_down()
+    # mosaic_colors = voting()
+    # arm_up()
+    # db.straight(-458)  # TODO: not magic
+    # turn(-90)
+    # linetrack("right", 404)
+    # db.straight(130)
+    # turn(90)
+    # cage_motor.run_angle(1000, -90)
+    # db.straight(300)
+    # cage_up()
+    # turn(28)
+    # db.straight(260)
+    # turn(-28)
+    # linetrack("blue", 1543 - 300 - 225, move_forward=False)
+    # turn(-20)
+    # db.straight(100)
+    # turn(20)
+    # cage_down()
+    # db.straight(-100)
+    # cage_motor.run_angle(1000, 45)
+    # turn(11)
+    # db.straight(-320)
+    # cage_down()
+    # turn(-11)
+    # db.straight(280)
+    # cage_up()
+    # turn(120)
+    # db.straight(150)
+    # turn(-30)
+    mosaic_colors = (1, 3, 0, 2, 3, 1)
+    linetrack("left", 650)  # Mandatory track until the end for alignment
+    db.straight(44)
+    turn(-90)
+    seq = grab_seq_algo(mosaic_colors)
+    mvt = grab_mvt_algo(seq)
+    grab(mvt)
 
 
 if __name__ == "__main__":
     main()
+    # cheese()
     # collecttest()
+    # # CLAW RESET PROC.
+    # claw_close()
+    # claw_motor.reset_angle(0)
+    # claw_open()
+    # # ARM RESET PROC.
+    # arm_down()
+    # arm_motor.reset_angle(0)
+    # grab_one(2, 1)
     # linetrack("both", 408, move_forward=False)
     # linetrack("distance", 800, sensor="left")
     # voting()
