@@ -1,7 +1,6 @@
 """Pybricks code for SPIKE Prime brain."""
 
 from pybricks.hubs import PrimeHub
-from pybricks.iodevices import PUPDevice
 from pybricks.parameters import Direction, Port, Stop
 from pybricks.pupdevices import Motor
 from pybricks.robotics import DriveBase
@@ -18,7 +17,7 @@ WHITE_THRESHOLD = 40
 LIGHT_SENSOR_Y = 64
 MAX_SPEED = 500
 ACCEL_DISTANCE = 200
-DECEL_DISTANCE = 200
+DECEL_DISTANCE = 100
 
 # Initialise hardware
 hub = PrimeHub()
@@ -38,22 +37,20 @@ print("db settings:", db.settings())
 print("Waiting for remote on Port.C")
 while True:
     try:
-        PUPDevice(Port.C)
-    except OSError:
-        wait(100)
-        continue
-    try:
+        # Raises OSError only when no device is present at all; while the ESP32
+        # is still syncing, Pybricks waits inside PUPDevice() for it to finish.
         remote = PUPRemoteHub(Port.C, max_packet_size=16)
         remote.add_command("beacn", "", "B")
         remote.add_command("cserv", "", "Bh")
         remote.add_channel("brigh", "BB")
         remote.add_channel("rgb", "9B")
         # remote.add_channel("dist", "hh")
-        remote.call("beacn", 67, wait_ms=2)
+        remote.call("beacn", 67)
         hub.speaker.beep(523)
         break
     except OSError:
-        wait(500)
+        wait(100)
+        continue
 
 fps_timer = StopWatch()
 
@@ -96,20 +93,21 @@ def turn(angle) -> None:
     db.turn(angle)
 
 
+# FIXME: doubled speed to 2000
 def arm_up() -> None:
     """Move arm up (currently assuming it starts from grabbing height)."""
-    arm_motor.run_angle(1000, 180)
-    arm_motor.run_until_stalled(1000, duty_limit=50)  # Remove this line to disable aligning
+    arm_motor.run_angle(2000, 180)
+    arm_motor.run_until_stalled(2000, duty_limit=50)  # Remove this line to disable aligning
 
 
 def arm_down(*, absolute=False) -> None:
     """Move arm down (currently to the correct height for grabbing)."""
     if absolute:
-        arm_motor.run_target(1000, 0)
+        arm_motor.run_target(2000, 0)
     else:
-        arm_motor.run_angle(1000, -130, then=Stop.NONE)  # Quickly go down
+        arm_motor.run_angle(2000, -130, then=Stop.NONE)  # Quickly go down
         arm_motor.run_until_stalled(-300, duty_limit=20)  # Slow down just before hitting ground
-        arm_motor.run_angle(1000, 67)
+        arm_motor.run_angle(2000, 67)
 
 
 def claw_open(stage: int = 0) -> None:
@@ -128,9 +126,9 @@ def cage_up() -> None:
     cage_motor.run_until_stalled(800, duty_limit=75)
 
 
-def cage_down() -> None:
+def cage_down(*, hold: bool = False) -> None:
     """Lower the cage and open the channels."""
-    cage_motor.run_until_stalled(-800, duty_limit=50)
+    cage_motor.run_until_stalled(-800, duty_limit=50, then=Stop.HOLD if hold else Stop.COAST)
 
 
 def starting_to_middle() -> None:
@@ -575,29 +573,25 @@ def lightsensor_test() -> None:
             print("remote call failed")
 
 
-def deposittest() -> None:
-    # deposit
+def deposit() -> None:
+    # arm_down()
+    # claw_open(1)
+    # arm_up()
+    # cage_down()
+    # db.straight(85)
+    # db.straight(-80)
+    # claw_motor.run_angle(1000, 30)  # open a bit more
+    # arm_down()
+    # claw_close()
+    # claw_motor.dc(-100)  # constant force
+    # wait(500)
+    # arm_up()
+    db.straight(115)  # 105?
     arm_down()
-    claw_close()
-    arm_up()
-    linetrack("both", 407, move_forward=False)
-    arm_down()
+    arm_motor.run_angle(1000, 60)  # drop from a bit higher
     claw_open(1)
     arm_up()
-    cage_down()
-    db.straight(85)
-    db.straight(-80)
-    claw_motor.run_angle(1000, 30)  # open a bit more
-    arm_down()
-    claw_close()
-    claw_motor.dc(-100)  # constant force
-    wait(500)
-    arm_up()
-    db.straight(100)
-    arm_down()
-    arm_motor.run_angle(1000, 40)  # drop from a bit higher
-    claw_open(1)
-    arm_up()
+    db.straight(-105 - 408 + LIGHT_SENSOR_Y)  # back on light sensors on line
 
 
 def cagesmashtesst() -> None:
@@ -628,8 +622,37 @@ def collecttest() -> None:
     grab_one("right", "right", 1)
 
 
+def trowels() -> None:
+    """Start with the robot on the right side cross-junction, facing south."""
+    linetrack("right", 404)
+    db.straight(130)
+    turn(90)
+    cage_motor.run_angle(1000, -90)
+    db.straight(300)
+    cage_up()
+    turn(27)
+    db.straight(260)
+    turn(-27)
+    linetrack("blue", 1543 - 300 - 225, move_forward=False)
+    turn(-20)
+    db.straight(100)
+    turn(20)
+    cage_down()
+    db.straight(-100)
+    cage_motor.run_angle(1000, 45)
+    turn(11)
+    db.straight(-320)
+    cage_down()
+    turn(-11)
+    db.straight(320)
+    cage_up()
+    turn(130)
+    db.straight(150)
+    turn(-40)
+
+
 def cheese() -> None:
-    # # CLAW RESET PROC.
+    # CLAW RESET PROC.
     claw_close()
     claw_motor.reset_angle(0)
     claw_open(2)
@@ -646,8 +669,62 @@ def cheese() -> None:
     db.straight(-60)
     turn(90)
     db.straight(100)
-    linetrack("both", 900)
+    linetrack("both", 900, move_forward=False)
+    db.straight(-191 + LIGHT_SENSOR_Y)
+    db.turn(45)
     arm_up()
+    cage_motor.run_angle(1000, -70)
+    db.straight(150)
+    cage_motor.run_until_stalled(500, duty_limit=100, then=Stop.HOLD)
+    # cage_up(hold=True)  # TODO: this dont exist lol
+    db.turn(-90)
+    db.straight(150)
+    db.turn(45)
+    linetrack("both", 642, move_forward=False)
+    db.straight(-112)
+    db.turn(90)
+    db.straight(-300)
+    cage_down()
+    db.straight(-124)
+    cage_up()
+    db.turn(90)
+    linetrack("both", 408 - 104 - LIGHT_SENSOR_Y, move_forward=False)
+    deposit()
+    db.straight(-250)
+    cage_down()
+    turn(10)
+    turn(-20)
+    turn(10)
+    cage_down(hold=True)
+    linetrack("both", 250)
+    db.turn(180 + 30)
+    db.turn(-30)
+    db.straight(-300)
+    cage_up()
+    db.straight(-120)
+    linetrack("both", 420)
+    db.turn(90)
+    trowels()
+    linetrack("left", 344, move_forward=False)
+    db.straight(-160)
+    db.turn(-90)
+    db.straight(320)
+    db.turn(90)
+    # CLAW RESET PROC.
+    claw_close()
+    claw_motor.reset_angle(0)
+    claw_open(2)
+    # ARM RESET PROC.
+    arm_down()
+    arm_motor.reset_angle(0)
+    arm_motor.run_target(1000, 40)
+    db.straight(80)
+    db.straight(-10)
+    claw_close()
+    claw_open(2)
+    db.straight(20)
+    claw_close()
+    db.straight(-90)
 
 
 def main() -> None:
@@ -677,31 +754,7 @@ def main() -> None:
     # arm_up()
     # db.straight(-458)  # TODO: not magic
     # turn(-90)
-    # linetrack("right", 404)
-    # db.straight(130)
-    # turn(90)
-    # cage_motor.run_angle(1000, -90)
-    # db.straight(300)
-    # cage_up()
-    # turn(28)
-    # db.straight(260)
-    # turn(-28)
-    # linetrack("blue", 1543 - 300 - 225, move_forward=False)
-    # turn(-20)
-    # db.straight(100)
-    # turn(20)
-    # cage_down()
-    # db.straight(-100)
-    # cage_motor.run_angle(1000, 45)
-    # turn(11)
-    # db.straight(-320)
-    # cage_down()
-    # turn(-11)
-    # db.straight(280)
-    # cage_up()
-    # turn(120)
-    # db.straight(150)
-    # turn(-30)
+    # scanning_and_trowels()
     mosaic_colors = (1, 3, 0, 2, 3, 1)
     linetrack("left", 650)  # Mandatory track until the end for alignment
     db.straight(44)
@@ -712,8 +765,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-    # cheese()
+    # main()
+    cheese()
     # collecttest()
     # # CLAW RESET PROC.
     # claw_close()

@@ -35,9 +35,10 @@ class TOFSenseF2Mini:
     BASE_ADDRESS = 0x08
     REG_DISTANCE = 0x24
 
-    def __init__(self, i2c: I2C, module_id: int = 0) -> None:
+    def __init__(self, i2c: I2C, mux_channel: int, module_id: int = 0) -> None:
         """Init."""
         self.i2c = i2c
+        self.mux_channel = mux_channel
         self.address = self.BASE_ADDRESS + module_id
 
     def read(self) -> dict[str, int | bool]:
@@ -51,6 +52,7 @@ class TOFSenseF2Mini:
             valid            True when status == 0
         """
         # distance(3) + status(1) + signal strength(2)
+        select_mux(self.i2c, self.mux_channel)
         try:
             data = self.i2c.readfrom_mem(self.address, self.REG_DISTANCE, 6)
         except OSError:
@@ -238,87 +240,121 @@ class Servo:
         self.pwm.duty_ns(duty)
 
 
-def patched_connect(self: lpf2.LPF2) -> None:
-    """Connect to the hub, using a fixed fast/slow UART probe.
+# How long the hub's TX must stay high before we believe it is listening (ms).
+# While identifying the device the hub pulls this line low for ~2 ms every ~16 ms,
+# and while it still holds a stale connection it sends a keep-alive every 100 ms.
+HUB_QUIET_MS = 150
+# Per-call budget for watching the line before giving the main loop back (ms).
+HUB_WATCH_MS = 170
+# Time to wait after a failed handshake before trying again (ms).
+CONNECT_RETRY_MS = 1000
+# Slack added to the computed handshake transmission time when waiting for ACK (ms).
+ACK_MARGIN_MS = 300
+SLOW_BAUD = 2400
 
-    Upstream `lpf2.LPF2.connect` counts loop iterations as milliseconds, so
-    interpreter overhead and GC pauses make the high-pulse measurement under-read.
-    The hub pulses at 16 ms, right on the `n < 16` boundary, so the probe randomly
-    picks the fast UART branch and then runs the handshake at 115200 against a hub
-    still listening at 2400. Measure elapsed time with ticks_ms and leave margin.
 
-    Also returns early (without blocking) when the hub isn't driving the line at
-    all, so the main loop keeps running and the next process() call retries soon,
-    instead of blasting a handshake into silence and waiting 2.5 s for an ACK
-    that cannot come. That dead wait kept this side busy exactly when the hub
-    started probing, so the two sides kept missing each other's handshake windows.
-    """
-    assert len(self.modes) > 0, "No modes (commands) defined"  # noqa: S101
-    fast_uart_hub = False
-    saw_hub_activity = False
-    self.init_pins()
-    self.wrt_tx_pin(1, 5)  # Say hello!
-    self.wrt_tx_pin(0, 0)
-    for attempt in range(25):  # Wait for AOK
-        start = ticks_ms()
-        n = 0
-        while self.rx_pin.value() == 1:
-            sleep_ms(1)
-            n = ticks_diff(ticks_ms(), start)
-            if n > 20:
-                break
-        if self.rx_pin.value() == 0:
-            saw_hub_activity = True
-        if self.debug:
-            logger.debug("probe %s: falling after ms high: %s", attempt, n)
-        if attempt > 10 and not saw_hub_activity:
-            # Line never fell: the hub isn't probing this port right now.
-            logger.info("No hub activity (line idle high), aborting connect")
-            return
-        if attempt > 10 and (n > 21 or n < 13):
-            fast_uart_hub = True
-            break
-        start = ticks_ms()
-        while self.rx_pin.value() == 0:
-            sleep_ms(1)  # Wait until rise again
-            if ticks_diff(ticks_ms(), start) > 50:
-                # Line stuck low (cable unplugged / floating); retry later
-                logger.info("Line stuck low, aborting connect")
-                return
-
-    if fast_uart_hub:
-        self.fast_uart()
-        sleep_ms(5)
-        self.write(b"\x04")
-    else:
-        self.slow_uart()
-        self.write(b"\x00")
-    self.write(self.setType(self.sensor_id))
-    self.write(self.defineModes())  # tell how many modes
-    self.write(self.defineBaud(115200))
-    self.write(self.defineVers("0.1", lpf2.__version__))
+def handshake_bytes(self: lpf2.LPF2) -> bytes:
+    """Build the whole LPF2 sync message (type, modes, baud, version, mode infos, ACK)."""
+    msg = bytearray(self.setType(self.sensor_id))
+    msg += self.defineModes()
+    msg += self.defineBaud(115200)
+    msg += self.defineVers("0.1", lpf2.__version__)
     num = len(self.modes) - 1
     for mode in reversed(self.modes):
-        sleep_ms(20)
-        self.setupMode(mode, num)
+        self.load_payload(b"\x00" * mode[8], num)  # Store empty payload for this mode
+        plus_8 = 0x00
+        n = num
+        if n > 7:
+            n -= 8
+            plus_8 = lpf2.MSG_INFO_PLUS8
+        msg += self.str_info(mode[0], n, lpf2.NAME | plus_8)
+        msg += self.buildRange(mode[2], n, lpf2.RAW | plus_8)
+        msg += self.buildRange(mode[3], n, lpf2.PCT | plus_8)
+        msg += self.buildRange(mode[4], n, lpf2.SI | plus_8)
+        msg += self.str_info(mode[5], n, lpf2.SYM | plus_8)
+        msg += self.buildFunctMap(mode[6], n, lpf2.FUNCTION_MAP | plus_8)
+        msg += self.buildFormat(mode[1], n, lpf2.FMT | plus_8)
         num -= 1
+    msg += b"\x04"  # ACK: end of info
+    return bytes(msg)
 
-    self.write(b"\x04")  # ACK
-    # The hub ACKs within milliseconds if it heard the handshake; a short
-    # timeout means a missed window is retried quickly instead of blocking.
-    end = ticks_add(ticks_ms(), 500)
-    while ticks_diff(end, ticks_ms()) > 0:  # Wait for ack
-        if self.readchar() == 0x04:  # BYTE_ACK
+
+def pybricks_connect(self: lpf2.LPF2) -> None:
+    """Connect to a Pybricks hub, replacing `lpf2.LPF2.connect`.
+
+    Pybricks identifies a UART device by driving ID2 (our TX) high through a
+    resistor and finding it held LOW, while ID1 (our RX) reads as open when the
+    hub releases it. It needs 20 identical detections in a row, one per ~16 ms
+    cycle, and only then opens its UART, sends a SPEED probe at 115200 and waits
+    at 2400 baud for the TYPE message. Upstream `connect` holds TX low for a
+    fixed 25 probe cycles and then sends TYPE whether or not the hub has got
+    that far, so from a cold boot the first attempt usually loses the race.
+
+    So instead: hold TX low, watch RX until the hub stops pulsing it (it idles
+    high once its UART is open), and only then raise TX and send the handshake
+    in one go. The ACK timeout covers the full transmission time at 2400 baud;
+    with five modes that is ~1.5 s, longer than any fixed short timeout.
+
+    Watching the line is bounded to HUB_WATCH_MS per call so the main loop keeps
+    running while the hub is still identifying us (or absent). The hub program's
+    PUPDevice() waits while the device is syncing and only errors when there is
+    no device at all, so keeping the hub in "device present" state matters.
+    """
+    assert len(self.modes) > 0, "No modes (commands) defined"  # noqa: S101
+    now = ticks_ms()
+    if ticks_diff(now, getattr(self, "next_attempt", 0)) < 0:
+        return  # Backing off after a failed handshake
+
+    if not getattr(self, "waiting_for_hub", False):
+        # First call since the last (re)connect: take the pins back from any
+        # previous UART and present ourselves as a UART device.
+        uart = getattr(self, "uart", None)
+        if uart is not None:
+            try:  # noqa: SIM105 (no contextlib on MicroPython)
+                uart.deinit()
+            except (AttributeError, OSError):
+                pass
+        # ID1 must read high (open) when the hub releases it, low would look like a motor
+        self.rx_pin = Pin(self.RX_PIN_N, Pin.IN, Pin.PULL_UP)
+        # ID2 held low against the hub's weak high is what marks a UART device
+        self.tx_pin = Pin(self.TX_PIN_N, Pin.OUT, value=0)
+        self.waiting_for_hub = True
+
+    # Wait for the hub's TX to go quiet-high: detection finished, UART listening.
+    # Busy-poll rather than sleep: the hub's low pulses are only ~2 ms wide.
+    high_since = ticks_ms()
+    end = ticks_add(high_since, HUB_WATCH_MS)
+    while True:
+        now = ticks_ms()
+        if self.rx_pin.value() == 0:
+            high_since = now
+        elif ticks_diff(now, high_since) >= HUB_QUIET_MS:
+            break
+        if ticks_diff(now, end) >= 0:
+            return  # Still being identified (or no hub). Try again next process().
+
+    # Hub is listening at 2400 baud for TYPE. Send everything in one stream.
+    self.waiting_for_hub = False
+    msg = handshake_bytes(self)
+    tx_ms = len(msg) * 10 * 1000 // SLOW_BAUD
+    self.slow_uart()  # TX now idles high
+    sleep_ms(5)  # Give the hub's UART a clean idle period after the long low
+    deadline = ticks_add(ticks_ms(), tx_ms + ACK_MARGIN_MS)
+    self.write(msg)
+    self.flush()  # Drop anything received while the hub was at 115200
+
+    while ticks_diff(deadline, ticks_ms()) > 0:  # Wait for ack
+        if self.readchar() == lpf2.BYTE_ACK:
             self.connected = True
             break
 
     if self.connected:
         self.last_nack = ticks_ms()
+        self.fast_uart()  # Hub switches to 115200 10 ms after its ACK
         logger.info("Connected to hub with sensor id %s", self.sensor_id)
-        if not fast_uart_hub:
-            self.fast_uart()
     else:
-        logger.error("Failed to connect to hub")
+        self.next_attempt = ticks_add(ticks_ms(), CONNECT_RETRY_MS)
+        logger.error("Failed to connect to hub, retrying in %s ms", CONNECT_RETRY_MS)
 
 
 def beacn(*_: None) -> None:
@@ -354,20 +390,35 @@ def read_scanning_rgb() -> tuple[int, ...]:
     return sum(rgbs, ())  # Flatten rgbs into a 9-tuple
 
 
-# Override the built-in connect function with our patched version
-lpf2.LPF2.connect = patched_connect
+def read_distances() -> tuple[int, ...]:
+    """Read the distances in mm from the TOFSense sensors (-1 if invalid)."""
+    distances = [-1 for _ in tofsenses]
+    for i, t in enumerate(tofsenses):
+        d = t.get_distance()
+        if d is not None:
+            distances[i] = d
+            logger.debug("tof %s: %s mm", i, d)
+        else:
+            logger.error("tof %s: invalid reading", i)
+    return tuple(distances)
+
+
+# Override the built-in connect function with the Pybricks-aware version
+lpf2.LPF2.connect = pybricks_connect
 
 # Onboard NeoPixel
 pixels = NeoPixel(Pin(25), 1)
 pixels.fill((0, 0, 0))
 pixels.write()
 
-# TOFSense-F2 Mini
-# tof_i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=400000)
-# tofsense = TOFSenseF2Mini(tof_i2c, 2)
+# I2C bus behind the TCA9548A mux
+i2c = I2C(0, scl=Pin(4), sda=Pin(5), freq=400000)
+
+# TOFSense-F2 Mini. Each sits on its own mux channel, so they can share an address.
+tofsenses = [TOFSenseF2Mini(i2c, mux_channel=channel, module_id=5) for channel in (2, 3)]
 
 # TCS3472
-tcs_i2c = I2C(0, scl=Pin(4), sda=Pin(5), freq=400000)
+tcs_i2c = i2c
 linetrack_tcs = []
 for i in range(2):
     tcs = TCS3472(tcs_i2c, mux_channel=i, integration_ms=2.4, gain=16)
@@ -392,18 +443,6 @@ if remote_disable_jumper.value() == 1:
     logger.warning("REMOTE TO SPIKE PRIME DISABLED")
     remote_enable = False
 
-beacon_state = 67
-beacon_start_time = 0
-flash_pattern = [
-    (0, (255, 255, 255)),
-    (50, (0, 0, 0)),
-    (100, (255, 255, 255)),
-    (150, (0, 0, 0)),
-    (500, (255, 0, 0)),
-    (600, (0, 0, 0)),
-]
-prev_connected = False
-
 if remote_enable:
     # Connection to hub
     remote = PUPRemoteSensor(power=True, max_packet_size=16)
@@ -412,6 +451,22 @@ if remote_enable:
     remote.add_command("cserv", "", "Bh")
     remote.add_channel("brigh", "BB")
     remote.add_channel("rgb", "9B")
+    remote.add_channel("dist", "hh")
+
+flash_pattern = [
+    (0, (255, 255, 255)),
+    (50, (0, 0, 0)),
+    (100, (255, 255, 255)),
+    (150, (0, 0, 0)),
+    (500, (255, 0, 0)),
+    (600, (0, 0, 0)),
+]
+# Start the strobe straight away so the LED shows the loop is alive from boot
+beacon_state = 0
+beacon_start_time = ticks_ms()
+pixels[0] = flash_pattern[0][1]
+pixels.write()
+prev_connected = False
 
 frame_count = 0
 while True:
@@ -450,9 +505,6 @@ while True:
         logger.info("FPS: %s", frame_count)
         frame_count = 0
 
-    # distance = tofsense.get_distance()
-    # logger.debug(f"Distance: {distance} mm")
-
     # Read TCS sensors
     brightnesses = [-1 for _ in linetrack_tcs]
     for i, s in enumerate(linetrack_tcs):
@@ -476,5 +528,8 @@ while True:
         # selected (during voting); skipping them keeps line-tracking FPS up.
         if remote.lpup.current_mode == remote.modes["rgb"]:
             remote.update_channel("rgb", *read_scanning_rgb())
+        # Likewise, only read the TOF sensors while the hub has the dist mode selected.
+        elif remote.lpup.current_mode == remote.modes["dist"]:
+            remote.update_channel("dist", *read_distances())
 
     frame_count += 1
