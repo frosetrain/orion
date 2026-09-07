@@ -12,12 +12,31 @@ WHEEL_DIAMETER = 62.4
 AXLE_TRACK = 167
 LEFT_WHITE = 88
 RIGHT_WHITE = 100
-BLACK_THRESHOLD = 30
-WHITE_THRESHOLD = 40
+BLACK_THRESHOLD = 20
+WHITE_THRESHOLD = 32
+BLUE_THRESHOLD = 60
 LIGHT_SENSOR_Y = 64
 MAX_SPEED = 500
 ACCEL_DISTANCE = 200
-DECEL_DISTANCE = 100
+DECEL_DISTANCE = 150
+
+# Mechanism positions in degrees, relative to the zero set by the reset functions.
+ARM_GRAB = 67  # claw at ground level
+ARM_UP = 250  # carry height, channels unblocked   (220)
+ARM_HOVER_CHEDDAR = 40
+ARM_HOVER_BLUE = 40
+ARM_DROP = 90  # release height in deposit()       (90)
+ARM_PUSH = -13  # low enough to push the released piece into place
+
+CLAW_CLOSED = 0
+CLAW_OPEN = {1: 70, 2: 120, 3: 240, 4: 167}  # keyed by blocks abreast (167)
+CLAW_PUSH = 105  # partly closed onto a released piece to push it away
+CLAW_CHANNEL_PULL = 150
+
+CAGE_UP = 0  # raised, channel doors closed
+CAGE_BOWL = -90
+CAGE_TROWEL = -110
+CAGE_SMASH = -120
 
 # Initialise hardware
 hub = PrimeHub()
@@ -27,11 +46,16 @@ arm_motor = Motor(Port.F, positive_direction=Direction.CLOCKWISE)
 claw_motor = Motor(Port.E, positive_direction=Direction.COUNTERCLOCKWISE)
 cage_motor = Motor(Port.A, positive_direction=Direction.CLOCKWISE)
 db = DriveBase(left_motor, right_motor, WHEEL_DIAMETER, AXLE_TRACK)
+
 db.use_gyro(True)
 db.settings(
     straight_speed=MAX_SPEED, straight_acceleration=1000, turn_rate=300, turn_acceleration=600
 )
+arm_motor.control.limits(2000, 5000, 263)
+claw_motor.control.limits(2000, 2000, 320)
+
 print("db settings:", db.settings())
+print("battery voltage:", hub.battery.voltage())
 
 # Initialise connection to remote.
 print("Waiting for remote on Port.C")
@@ -46,7 +70,7 @@ while True:
         remote.add_channel("rgb", "9B")
         # remote.add_channel("dist", "hh")
         remote.call("beacn", 67)
-        hub.speaker.beep(523)
+        # hub.speaker.beep(523)
         break
     except OSError:
         wait(100)
@@ -54,11 +78,9 @@ while True:
 
 fps_timer = StopWatch()
 
-arm_motor.control.limits(2000, 5000, 263)
-claw_motor.control.limits(2000, 2000, 320)
-
 # Since we grab tiles twice, we have to keep track of which ones are left over from the first grab
 available_stock = [list(range(6)) for i in range(4)]  # Oh no, global state!
+intended_heading = 0
 
 
 def rgb_to_hsv(rgb: tuple[int, int, int]):
@@ -90,45 +112,92 @@ def rgb_to_hsv(rgb: tuple[int, int, int]):
 
 
 def turn(angle) -> None:
+    # global intended_heading
+    # imu_heading = hub.imu.heading()
+    # print(angle, imu_heading, intended_heading)
+    # db.turn(angle - imu_heading + intended_heading)
+    # intended_heading += angle
     db.turn(angle)
 
 
-# FIXME: doubled speed to 2000
-def arm_up() -> None:
-    """Move arm up (currently assuming it starts from grabbing height)."""
-    arm_motor.run_angle(2000, 180)
-    arm_motor.run_until_stalled(2000, duty_limit=50)  # Remove this line to disable aligning
+def arm_to(angle: int, speed: int = 1000, wait: bool = True) -> None:
+    arm_motor.run_target(speed, angle, wait=wait)
 
 
-def arm_down(*, absolute=False) -> None:
-    """Move arm down (currently to the correct height for grabbing)."""
-    if absolute:
-        arm_motor.run_target(2000, 0)
-    else:
-        arm_motor.run_angle(2000, -130, then=Stop.NONE)  # Quickly go down
-        arm_motor.run_until_stalled(-300, duty_limit=20)  # Slow down just before hitting ground
-        arm_motor.run_angle(2000, 67)
+def arm_up(*, wait: bool = True) -> None:
+    arm_to(ARM_UP, wait=wait)
 
 
-def claw_open(stage: int = 0) -> None:
-    """Open the claw."""
-    stages = [80, 120, 240]
-    claw_motor.run_target(1000, stages[stage])
+def arm_down(*, wait: bool = True) -> None:
+    arm_to(ARM_GRAB, 1000, wait=wait)
+
+
+def arm_wait() -> None:
+    """Block until a non-blocking arm move has finished."""
+    while not arm_motor.control.done():
+        wait(10)
+
+
+def reset_arm() -> None:
+    """Find the floor by stalling, then zero at grab height. Start with the arm up."""
+    arm_motor.run_angle(1000, -130, then=Stop.NONE)
+    arm_motor.run_until_stalled(-300, duty_limit=50)
+    arm_motor.reset_angle(-67)
+    arm_down()
+
+
+def claw_to(angle: int, speed: int = 1000) -> None:
+    claw_motor.run_target(speed, angle)
+
+
+def claw_open(abreast: int = 1, speed: int = 1000) -> None:
+    claw_to(CLAW_OPEN[abreast], speed=speed)
 
 
 def claw_close() -> None:
-    """Close the claw."""
+    """Close until stalled so the claw grips whatever is inside."""
     claw_motor.run_until_stalled(-1000, then=Stop.HOLD, duty_limit=100)
 
 
-def cage_up() -> None:
-    """Raise the cage and close the channels."""
-    cage_motor.run_until_stalled(800, duty_limit=75)
+def reset_claw() -> None:
+    claw_close()
+    claw_motor.reset_angle(CLAW_CLOSED)
+    claw_open(3)
+
+
+def cage_to(angle: int, speed: int = 1000, wait: bool = True) -> None:
+    cage_motor.run_target(speed, angle, wait=wait)
+
+
+def cage_up(*, hold: bool = False) -> None:
+    """Raise until stalled. Without hold it reached the end stop, so re-zero there.
+
+    With hold it may have stalled against an object (e.g. the bowl), so the angle is kept.
+    """
+    cage_motor.run_until_stalled(1000, duty_limit=75, then=Stop.HOLD if hold else Stop.COAST)
+    if not hold:
+        cage_motor.reset_angle(CAGE_UP)
 
 
 def cage_down(*, hold: bool = False) -> None:
-    """Lower the cage and open the channels."""
-    cage_motor.run_until_stalled(-800, duty_limit=50, then=Stop.HOLD if hold else Stop.COAST)
+    """Lower the cage and open the channel doors."""
+    cage_motor.run_until_stalled(-1000, duty_limit=50, then=Stop.HOLD if hold else Stop.COAST)
+
+
+def reset_mechanisms() -> None:
+    """Calibrate every mechanism. Start with the arm up so it can find the floor."""
+    cage_up()
+    reset_claw()
+    reset_arm()
+
+
+def wall_align(duration: int, new_heading: int) -> None:
+    db.drive(-500, 0)
+    wait(duration)
+    db.stop()
+    wait(500)
+    db.reset(angle=new_heading)
+    wait(500)
 
 
 def starting_to_middle() -> None:
@@ -155,7 +224,7 @@ def linetrack(
         follow_line: Whether to linetrack. Defaults to True.
 
     """
-    db.reset()
+    db.reset(distance=0, angle=hub.imu.heading())
     left_brightness = -1
     right_brightness = -1
     fps_timer.reset()
@@ -183,7 +252,7 @@ def linetrack(
         elif junction_type == "right":
             hit = left_brightness > WHITE_THRESHOLD and right_brightness < BLACK_THRESHOLD
         elif junction_type == "blue":  # Looser threshold for detecting blue box
-            hit = left_brightness < 50 and right_brightness < 50
+            hit = left_brightness < BLUE_THRESHOLD and right_brightness < BLUE_THRESHOLD
         elif junction_type == "distance":
             hit = db.distance() >= theoretical - LIGHT_SENSOR_Y
         else:
@@ -224,8 +293,8 @@ def linetrack(
             break
 
         # Ramp up speed at the start, then ramp down speed before the end
-        start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 300 + 200)
-        end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 300 + 200)
+        start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 375 + 200)
+        end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 375 + 200)
         speed = max(200, min(MAX_SPEED, start_speed_cap, end_speed_cap))
 
         # DC version
@@ -261,7 +330,7 @@ def voting() -> list[int]:
             3: White
 
     """
-    db.reset()
+    db.reset(distance=0, angle=hub.imu.heading())
     # Reading the rgb channel switches the ESP32 to the rgb mode, which makes
     # it start reading the scanning sensors; do it now (result discarded) so
     # fresh data is already streaming when the first window starts.
@@ -273,7 +342,6 @@ def voting() -> list[int]:
     first_start = 32
     # (Start, end) of each slot
     slot_distances = ((first_start, first_start + 32), (first_start + 50, first_start + 50 + 32))
-    # TODO: tune
 
     for row in range(2):
         # print("Start row", row)
@@ -432,10 +500,9 @@ def grab_one(channel: int, num: int) -> None:
 
     """
     print(f"Grabbing into {channel}, num {num}")
-    # TODO: middle channel back is channel, front is claw
     channel_polarity = channel - 1  # -1, 0 or 1
 
-    arm_down(absolute=True)
+    arm_down()  # Also finishes the non-blocking lower from the previous grab
     claw_open()
     db.straight(64 * num)  # 120 for both
     claw_close()
@@ -445,26 +512,47 @@ def grab_one(channel: int, num: int) -> None:
     elif channel == 1:
         # Middle channel
         db.straight(-20 - 64 * num)
-        claw_open(2)
-        arm_up()
+        claw_open(3)
+        arm_up()  # Must finish before the cage moves: a low arm blocks the channels
         cage_down()
         db.straight(80)
         cage_up()
-        arm_down(absolute=True)
-        db.straight(-94)
+        arm_down()  # Lower while reversing; the next grab_one waits for it
+        db.straight(-74)  # -94
     else:
         # Either of the side channels
-        db.straight(-20 - 64 * num)
-        claw_open(2)
+        db.straight(-20 - 64 * num)  # -20
+        claw_open(3)
         db.straight(-50)
         arm_up()
         turn(-12 * channel_polarity)
+        arm_wait()  # Arm must be clear of the channels before the cage moves
         cage_down()
-        db.straight(160)
+        db.straight(140)
         cage_up()
-        arm_down(absolute=True)
-        db.straight(-100)
+        arm_down()  # Lower while reversing and turning back
+        db.straight(-80)  # 100
         turn(12 * channel_polarity)
+
+
+def go_to_zone(
+    current_color: int, current_side: int, g_color: int, g_side: int, backward: bool = False
+) -> None:
+    north = g_color > current_color
+    turn_direction = 1 if north else -1  # 1 = right then left, -1 = left then right
+    north_weird = 1 if north else 0  # the side that is southern -> more line track, less stra
+    if backward:
+        north = not north  # only used for junction type
+
+    print("linetrack north", north)
+    turn(90 * turn_direction)
+    linetrack(
+        "left" if north else "right",
+        abs(g_color - current_color) * 160 + (36 if current_side == north_weird else -36),
+        move_forward=False,
+    )
+    db.straight(LIGHT_SENSOR_Y + (-36 if g_side == north_weird else 36))
+    turn(-90 * turn_direction)
 
 
 def grab(grabs: list[list[int]]) -> None:
@@ -474,13 +562,7 @@ def grab(grabs: list[list[int]]) -> None:
     """
     current_color = 3
     current_side = 0
-    # CLAW RESET PROC.
-    claw_close()
-    claw_motor.reset_angle(0)
-    claw_open()
-    # ARM RESET PROC.
-    arm_down()
-    arm_motor.reset_angle(0)
+    reset_mechanisms()
 
     for i, g in enumerate(grabs):
         g_color, g_side, g_channel, g_num = g
@@ -488,37 +570,15 @@ def grab(grabs: list[list[int]]) -> None:
         if g_color == current_color:
             if g_side < current_side:
                 turn(90)
-                db.straight(88)
+                db.straight(72)
                 turn(-90)
             elif g_side > current_side:
                 turn(-90)
-                db.straight(88)
+                db.straight(72)
                 turn(90)
             # else do nothing - we are already in the correct place
         else:
-            # move!
-            if g_color > current_color:
-                print("linetrack riughtwarrd")
-                turn(90)
-                linetrack(
-                    "left",
-                    (g_color - current_color) * 160 + (44 if current_side == 1 else -44),
-                    move_forward=False,
-                )
-                # wait(1000)
-                db.straight(LIGHT_SENSOR_Y + (44 if g_side == 0 else -44))
-                turn(-90)
-            elif g_color < current_color:
-                print("linetrack lefthwuduaw")
-                turn(-90)
-                linetrack(
-                    "right",
-                    (current_color - g_color) * 160 + (44 if current_side == 0 else -44),
-                    move_forward=False,
-                )
-                # wait(1000)
-                db.straight(LIGHT_SENSOR_Y + (44 if g_side == 1 else -44))
-                turn(90)
+            go_to_zone(current_color, current_side, g_color, g_side)
 
         if g_channel == 1 and i == len(grabs) - 1:
             # Last grab is always with the claw
@@ -528,6 +588,92 @@ def grab(grabs: list[list[int]]) -> None:
         current_color = g_color
         current_side = g_side
         # wait(2000)
+    arm_wait()  # Don't return with the arm still moving
+
+    # Move to deposit area (at "color 1.5")
+    turn(-90)
+    linetrack("both", abs(current_color + 1) * 160 + (36 if current_side == 0 else -36))
+    turn(180)
+
+
+def deposit_from_channels() -> None:
+    # arm_down()
+    claw_open(2)
+    arm_up()
+    cage_down()
+    db.straight(85)
+    db.straight(-90)
+    claw_open(3)
+    arm_to(ARM_HOVER_CHEDDAR)
+    # db.settings(straight_speed=200)
+    # db.straight(200)
+    # db.settings(straight_speed=MAX_SPEED)
+    # db.straight(-10)
+    claw_close()
+    claw_open(3)
+    arm_to(ARM_HOVER_CHEDDAR)
+    db.straight(20)
+    claw_close()
+    wait(500)
+    arm_up()
+    deposit()
+
+
+def deposit() -> None:
+    db.straight(105)  # 105?
+    reset_arm()
+    arm_to(ARM_DROP)
+    claw_open(4)  # Special dropping size
+    db.straight(-50)
+    arm_to(ARM_PUSH)
+    db.straight(50)
+    claw_to(CLAW_PUSH)
+    claw_open(3)
+    arm_up()
+    db.straight(-105 - 408 + LIGHT_SENSOR_Y)  # back on light sensors on line
+
+
+def cage_smash() -> None:
+    """Use the cage to get mosaic tiles into the correct positions. Starts at left junction."""
+    cage_to(CAGE_SMASH)
+    db.straight(-310)
+    db.straight(40)
+    cage_up()
+    cage_down()
+    db.straight(-15)
+    db.straight(15)
+    turn(10)
+    turn(-20)
+    turn(10)
+    cage_up()
+    db.straight(-3)
+    linetrack("both", 270)
+
+
+def trowels() -> None:
+    """Start with the robot on the right side cross-junction, facing south."""
+    linetrack("right", 404)
+    db.straight(130)
+    turn(90)
+    cage_to(CAGE_TROWEL)
+    db.straight(300)
+    cage_up()
+    db.straight(700)
+    db.straight(-80)
+    turn(30)
+    db.straight(167)  # 230
+    turn(-30)
+    # linetrack("blue", 1543 - 1065, move_forward=False, follow_line=False)  # 300+700-80+230cos30
+    db.straight(1543 - 1065)
+    turn(90)
+    wall_align(1000, 0)
+    db.straight(110)
+    turn(-90)
+    # db.straight(120)
+    cage_to(CAGE_BOWL)
+    db.straight(-80)
+    cage_up()
+    turn(90)
 
 
 def linetrack_test() -> None:
@@ -573,123 +719,72 @@ def lightsensor_test() -> None:
             print("remote call failed")
 
 
-def deposit() -> None:
-    # arm_down()
-    # claw_open(1)
-    # arm_up()
-    # cage_down()
-    # db.straight(85)
-    # db.straight(-80)
-    # claw_motor.run_angle(1000, 30)  # open a bit more
-    # arm_down()
-    # claw_close()
-    # claw_motor.dc(-100)  # constant force
-    # wait(500)
-    # arm_up()
-    db.straight(115)  # 105?
-    arm_down()
-    arm_motor.run_angle(1000, 60)  # drop from a bit higher
-    claw_open(1)
+def grab_test():
+    seq = grab_seq_algo((0, 2, 1, 2, 3, 0))
+    mvt = grab_mvt_algo(seq)
+    grab(mvt)
+    linetrack("right", 424)
+    turn(90)
+    linetrack("both", 408, move_forward=False)
+    deposit_from_channels()
+
+
+def deposit_test():
+    reset_mechanisms()
+    arm_to(ARM_HOVER_CHEDDAR)
+    claw_close()
     arm_up()
-    db.straight(-105 - 408 + LIGHT_SENSOR_Y)  # back on light sensors on line
-
-
-def cagesmashtesst() -> None:
-    starting_to_middle()
-    turn(90)
-    cage_motor.run_angle(500, -120)
-    db.straight(-260)
-    while True:
-        cage_down()
-        # db.straight(-15)
-        # db.straight(30)
-        # db.straight(-15)
-        # turn(10)
-        # turn(-20)
-        # turn(10)
-        cage_up()
-        db.straight(-3)
-
-
-def collecttest() -> None:
-    starting_to_middle()
-    turn(180)
-    linetrack("right", 674)
-    turn(90)
-    linetrack("left", 344)
-    grab_one("left", "left", 2)
-    grab_one("left", "right", 1)
-    grab_one("right", "right", 1)
-
-
-def trowels() -> None:
-    """Start with the robot on the right side cross-junction, facing south."""
-    linetrack("right", 404)
-    db.straight(130)
-    turn(90)
-    cage_motor.run_angle(1000, -90)
-    db.straight(300)
-    cage_up()
-    turn(27)
-    db.straight(260)
-    turn(-27)
-    linetrack("blue", 1543 - 300 - 225, move_forward=False)
-    turn(-20)
-    db.straight(100)
-    turn(20)
-    cage_down()
-    db.straight(-100)
-    cage_motor.run_angle(1000, 45)
-    turn(11)
-    db.straight(-320)
-    cage_down()
-    turn(-11)
-    db.straight(320)
-    cage_up()
-    turn(130)
-    db.straight(150)
-    turn(-40)
+    linetrack("both", 408, move_forward=False)
+    deposit()
 
 
 def cheese() -> None:
-    # CLAW RESET PROC.
-    claw_close()
-    claw_motor.reset_angle(0)
-    claw_open(2)
-    # ARM RESET PROC.
-    arm_down()
-    arm_motor.reset_angle(0)
-    arm_motor.run_target(1000, 40)
+    """Acquire, transport and deliver the Cheese."""
+    # GRAB CHEDDAR
+    reset_mechanisms()
+    # arm_up()  # IF STARTING BEFORE TROWELS
+    claw_open(3)
+    arm_to(ARM_HOVER_CHEDDAR)
+    db.settings(straight_speed=200)
     db.straight(200)
+    db.settings(straight_speed=MAX_SPEED)
     db.straight(-10)
     claw_close()
-    claw_open(2)
+    claw_open(3)
+    arm_to(ARM_HOVER_CHEDDAR)
     db.straight(20)
     claw_close()
+    arm_up()
     db.straight(-60)
     turn(90)
+
+    # COLLECT BOWL
     db.straight(100)
     linetrack("both", 900, move_forward=False)
-    db.straight(-191 + LIGHT_SENSOR_Y)
-    db.turn(45)
-    arm_up()
-    cage_motor.run_angle(1000, -70)
-    db.straight(150)
-    cage_motor.run_until_stalled(500, duty_limit=100, then=Stop.HOLD)
-    # cage_up(hold=True)  # TODO: this dont exist lol
-    db.turn(-90)
-    db.straight(150)
-    db.turn(45)
+    db.straight(-191 + 60 + LIGHT_SENSOR_Y)
+    cage_to(CAGE_BOWL, wait=False)  # NOTE: Swapped this and the following turn
+    turn(55)
+    db.straight(111)  # 111
+    cage_up(hold=True)
+    turn(-110)
+    db.straight(126)  # 111
+    turn(55)
     linetrack("both", 642, move_forward=False)
     db.straight(-112)
-    db.turn(90)
+
+    # DEPOSIT BOWL
+    turn(90)
     db.straight(-300)
-    cage_down()
+    cage_to(CAGE_BOWL)  # TODO: try wait=False
     db.straight(-124)
     cage_up()
-    db.turn(90)
+    turn(90)
+
+    # DEPOSIT CHEDDAR
     linetrack("both", 408 - 104 - LIGHT_SENSOR_Y, move_forward=False)
     deposit()
+
+    # COLLECT SHREDDED MOULD
     db.straight(-250)
     cage_down()
     turn(10)
@@ -697,89 +792,83 @@ def cheese() -> None:
     turn(10)
     cage_down(hold=True)
     linetrack("both", 250)
-    db.turn(180 + 30)
-    db.turn(-30)
+    turn(180 + 30)
+    turn(-30)
+
+    # DEPOSIT SHREDDED MOULD
     db.straight(-300)
     cage_up()
-    db.straight(-120)
-    linetrack("both", 420)
-    db.turn(90)
+    db.straight(-100)
+    linetrack("both", 400)
+    turn(90)
+
+    # TROWELS
     trowels()
-    linetrack("left", 344, move_forward=False)
-    db.straight(-160)
-    db.turn(-90)
-    db.straight(320)
-    db.turn(90)
-    # CLAW RESET PROC.
-    claw_close()
-    claw_motor.reset_angle(0)
-    claw_open(2)
-    # ARM RESET PROC.
-    arm_down()
-    arm_motor.reset_angle(0)
-    arm_motor.run_target(1000, 40)
-    db.straight(80)
+
+    # COLLECT BLUE CHEESE
+    db.straight(140)
+    turn(90)
+    wall_align(1500, 90)
+    db.straight(136)  # TODO: this is  weird
+    turn(-90)
+    reset_mechanisms()
+    arm_to(ARM_HOVER_BLUE)
+    db.settings(straight_speed=200)
+    db.straight(150)
+    db.settings(straight_speed=MAX_SPEED)
     db.straight(-10)
     claw_close()
-    claw_open(2)
+    claw_open(3)
+    arm_to(ARM_HOVER_BLUE)
     db.straight(20)
     claw_close()
-    db.straight(-90)
+    arm_up()
+    turn(90)
 
-
-def main() -> None:
-    """Execute the main mission."""
-    # starting_to_middle()
-    # turn(90)
-    # claw_open(1)
-    # arm_down()
-    # arm_motor.run_angle(1000, 40)
-    # claw_close()
-    # arm_up()
-    # turn(-90)
-    # linetrack("both", 675)
-    # turn(-90)
-    # linetrack("distance", 202)
-    # turn(-90)
-    # arm_down()
-    # claw_open()
-    # arm_up()
-    # turn(90)
-    # linetrack("both", 202)
-    # turn(-90)
-    # linetrack("both", 408, move_forward=False)
-    # claw_open(2)  # flat
-    # arm_down()
-    # mosaic_colors = voting()
-    # arm_up()
-    # db.straight(-458)  # TODO: not magic
-    # turn(-90)
-    # scanning_and_trowels()
-    mosaic_colors = (1, 3, 0, 2, 3, 1)
-    linetrack("left", 650)  # Mandatory track until the end for alignment
-    db.straight(44)
+    # DEPOSIT BLUE CHEESE
+    db.straight(298)
     turn(-90)
-    seq = grab_seq_algo(mosaic_colors)
-    mvt = grab_mvt_algo(seq)
-    grab(mvt)
+    linetrack("right", 190)  # TODO??
+    turn(90)
+    linetrack("both", 408, move_forward=False)
+    deposit()
+    turn(90)
+
+    # CAGE SMASH
+    linetrack("both", 424)
+    turn(-90)
+    linetrack("both", 675)
+    turn(90)
+    cage_smash()
+
+    # COLLECT SHREDDED CHEDDAR
+    turn(-90)
+    linetrack("both", 675)
+    turn(-90)
+    linetrack("right", 674)
+    turn(-90)
+    db.straight(-250)
+    cage_down()
+    turn(10)
+    turn(-20)
+    turn(10)
+    cage_down(hold=True)
+    db.straight(125)
+
+    # DEPOSIT SHREDDED CHEDDAR
+    turn(90)
+    db.straight(-691)
+    db.curve(-AXLE_TRACK / 2, -90)
+    db.straight(-690)
+    turn(90 + 30)
+    turn(-30)
+    cage_up()
+    db.straight(-235)
 
 
 if __name__ == "__main__":
-    # main()
+    db.reset()
     cheese()
-    # collecttest()
-    # # CLAW RESET PROC.
-    # claw_close()
-    # claw_motor.reset_angle(0)
-    # claw_open()
-    # # ARM RESET PROC.
-    # arm_down()
-    # arm_motor.reset_angle(0)
-    # grab_one(2, 1)
-    # linetrack("both", 408, move_forward=False)
-    # linetrack("distance", 800, sensor="left")
-    # voting()
-    # linetrack_test()
     # lightsensor_test()
-    # deposittest()
-    # cagesmashtesst()
+    # grab_test()
+    # deposit_test()

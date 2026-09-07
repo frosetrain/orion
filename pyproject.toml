@@ -18,6 +18,15 @@ line-length = 100
 [tool.ruff.lint]
 select = ["ANN", "S", "B", "A", "C4", "CPY", "DTZ", "FIX", "ISC", "ICN", "LOG", "G", "PIE", "PYI", "Q", "RET", "SLF", "SIM", "TID", "ARG", "PTH", "I", "N", "PERF", "E", "W", "DOC", "D", "F", "UP", "FURB", "RUF", "TRY"]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests live in grabtest.py: asserts and docstrings on test functions are fine
+"grabtest.py" = ["S101", "D103"]
+
 [project.optional-dependencies]
 # install to folder typings
 # uv pip install -r pyproject.toml --extra stubs --target typings
