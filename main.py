@@ -13,19 +13,19 @@ AXLE_TRACK = 167
 LEFT_WHITE = 88
 RIGHT_WHITE = 100
 BLACK_THRESHOLD = 20
-WHITE_THRESHOLD = 32
-BLUE_THRESHOLD = 60
+WHITE_THRESHOLD = 29
+BLUE_THRESHOLD = 36
 LIGHT_SENSOR_Y = 64
 MAX_SPEED = 500
 ACCEL_DISTANCE = 200
 DECEL_DISTANCE = 150
 
 # Mechanism positions in degrees, relative to the zero set by the reset functions.
-ARM_GRAB = 67  # claw at ground level
+ARM_GRAB = 40  # claw at ground level  (67)
 ARM_UP = 250  # carry height, channels unblocked   (220)
 ARM_HOVER_CHEDDAR = 40
 ARM_HOVER_BLUE = 40
-ARM_DROP = 90  # release height in deposit()       (90)
+ARM_DROP = 67  # release height in deposit()       (90)
 ARM_PUSH = -13  # low enough to push the released piece into place
 
 CLAW_CLOSED = 0
@@ -34,7 +34,7 @@ CLAW_PUSH = 105  # partly closed onto a released piece to push it away
 CLAW_CHANNEL_PULL = 150
 
 CAGE_UP = 0  # raised, channel doors closed
-CAGE_BOWL = -90
+CAGE_BOWL = -80
 CAGE_TROWEL = -110
 CAGE_SMASH = -120
 
@@ -124,8 +124,8 @@ def arm_to(angle: int, speed: int = 1000, wait: bool = True) -> None:
     arm_motor.run_target(speed, angle, wait=wait)
 
 
-def arm_up(*, wait: bool = True) -> None:
-    arm_to(ARM_UP, wait=wait)
+def arm_up(*, speed: int = 1000, wait: bool = True) -> None:
+    arm_to(ARM_UP, speed=speed, wait=wait)
 
 
 def arm_down(*, wait: bool = True) -> None:
@@ -141,7 +141,7 @@ def arm_wait() -> None:
 def reset_arm() -> None:
     """Find the floor by stalling, then zero at grab height. Start with the arm up."""
     arm_motor.run_angle(1000, -130, then=Stop.NONE)
-    arm_motor.run_until_stalled(-300, duty_limit=50)
+    arm_motor.run_until_stalled(-300, duty_limit=25)
     arm_motor.reset_angle(-67)
     arm_down()
 
@@ -293,9 +293,10 @@ def linetrack(
             break
 
         # Ramp up speed at the start, then ramp down speed before the end
-        start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 375 + 200)
-        end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 375 + 200)
+        start_speed_cap = max(0, db.distance() / ACCEL_DISTANCE * 300 + 200)
+        end_speed_cap = max(0, (detection_start - db.distance()) / DECEL_DISTANCE * 300 + 200)
         speed = max(200, min(MAX_SPEED, start_speed_cap, end_speed_cap))
+        speed = min(speed, 377)
 
         # DC version
         base = speed / 5  # 100% DC is ~500mm/s speed
@@ -626,11 +627,17 @@ def deposit() -> None:
     claw_open(4)  # Special dropping size
     db.straight(-50)
     arm_to(ARM_PUSH)
+    db.settings(straight_speed=200)
     db.straight(50)
+    db.settings(straight_speed=MAX_SPEED)
     claw_to(CLAW_PUSH)
     claw_open(3)
     arm_up()
-    db.straight(-105 - 408 + LIGHT_SENSOR_Y)  # back on light sensors on line
+    db.straight(-105)
+    turn(180)
+    linetrack("both", 408 - LIGHT_SENSOR_Y)
+    turn(180)
+    # db.straight(-105 - 408 + LIGHT_SENSOR_Y)  # back on light sensors on line
 
 
 def cage_smash() -> None:
@@ -752,10 +759,11 @@ def cheese() -> None:
     claw_close()
     claw_open(3)
     arm_to(ARM_HOVER_CHEDDAR)
-    db.straight(20)
+    db.straight(30)
     claw_close()
-    arm_up()
-    db.straight(-60)
+    claw_motor.dc(-100)
+    arm_up(speed=300)
+    db.straight(-70)
     turn(90)
 
     # COLLECT BOWL
@@ -767,7 +775,7 @@ def cheese() -> None:
     db.straight(111)  # 111
     cage_up(hold=True)
     turn(-110)
-    db.straight(126)  # 111
+    db.straight(119)  # 111
     turn(55)
     linetrack("both", 642, move_forward=False)
     db.straight(-112)
@@ -777,7 +785,7 @@ def cheese() -> None:
     db.straight(-300)
     cage_to(CAGE_BOWL)  # TODO: try wait=False
     db.straight(-124)
-    cage_up()
+    # cage_up()
     turn(90)
 
     # DEPOSIT CHEDDAR
