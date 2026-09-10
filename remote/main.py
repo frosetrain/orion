@@ -35,7 +35,7 @@ class TOFSenseF2Mini:
     BASE_ADDRESS = 0x08
     REG_DISTANCE = 0x24
 
-    def __init__(self, i2c: I2C, mux_channel: int, module_id: int = 0) -> None:
+    def __init__(self, i2c: I2C, mux_channel: int | None, module_id: int = 0) -> None:
         """Init."""
         self.i2c = i2c
         self.mux_channel = mux_channel
@@ -52,7 +52,8 @@ class TOFSenseF2Mini:
             valid            True when status == 0
         """
         # distance(3) + status(1) + signal strength(2)
-        select_mux(self.i2c, self.mux_channel)
+        if self.mux_channel is not None:
+            select_mux(self.i2c, self.mux_channel)
         try:
             data = self.i2c.readfrom_mem(self.address, self.REG_DISTANCE, 6)
         except OSError:
