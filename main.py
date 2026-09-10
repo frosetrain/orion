@@ -51,8 +51,8 @@ db.use_gyro(True)
 db.settings(
     straight_speed=MAX_SPEED, straight_acceleration=1000, turn_rate=300, turn_acceleration=600
 )
-arm_motor.control.limits(2000, 5000, 263)
-claw_motor.control.limits(2000, 2000, 320)
+arm_motor.control.limits(1000, 5000, 263)
+claw_motor.control.limits(1000, 2000, 320)
 
 print("db settings:", db.settings())
 print("battery voltage:", hub.battery.voltage())
@@ -68,7 +68,7 @@ while True:
         remote.add_command("cserv", "", "Bh")
         remote.add_channel("brigh", "BB")
         remote.add_channel("rgb", "9B")
-        # remote.add_channel("dist", "hh")
+        remote.add_channel("dist", "hh")
         remote.call("beacn", 67)
         # hub.speaker.beep(523)
         break
@@ -644,7 +644,7 @@ def cage_smash() -> None:
     """Use the cage to get mosaic tiles into the correct positions. Starts at left junction."""
     cage_to(CAGE_SMASH)
     db.straight(-310)
-    db.straight(40)
+    db.straight(20)
     cage_up()
     cage_down()
     db.straight(-15)
@@ -654,7 +654,7 @@ def cage_smash() -> None:
     turn(10)
     cage_up()
     db.straight(-3)
-    linetrack("both", 270)
+    linetrack("both", 290)
 
 
 def trowels() -> None:
@@ -681,6 +681,20 @@ def trowels() -> None:
     db.straight(-80)
     cage_up()
     turn(90)
+
+
+def robots_meet_culture() -> None:
+    linetrack("both", 407, move_forward=False)
+    db.straight(-62 + LIGHT_SENSOR_Y)
+    turn(-45)
+    db.straight(330)
+    turn(45)
+    db.straight(103)
+    turn(-180)
+    db.straight(-103)
+    turn(45)
+    db.straight(-330)
+    turn(-45)
 
 
 def linetrack_test() -> None:
@@ -783,7 +797,7 @@ def cheese() -> None:
     # DEPOSIT BOWL
     turn(90)
     db.straight(-300)
-    cage_to(CAGE_BOWL)  # TODO: try wait=False
+    cage_to(CAGE_BOWL)
     db.straight(-124)
     # cage_up()
     turn(90)
@@ -836,7 +850,7 @@ def cheese() -> None:
     # DEPOSIT BLUE CHEESE
     db.straight(298)
     turn(-90)
-    linetrack("right", 190)  # TODO??
+    linetrack("right", 230)
     turn(90)
     linetrack("both", 408, move_forward=False)
     deposit()
@@ -861,7 +875,8 @@ def cheese() -> None:
     turn(-20)
     turn(10)
     cage_down(hold=True)
-    db.straight(125)
+    linetrack("left", 250, move_forward=False)
+    db.straight(-125 + LIGHT_SENSOR_Y)
 
     # DEPOSIT SHREDDED CHEDDAR
     turn(90)
