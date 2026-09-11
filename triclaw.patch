@@ -1,0 +1,104 @@
+diff --git a/main.py b/main.py
+index 255ae3f..32bf7d6 100644
+--- a/main.py
++++ b/main.py
+@@ -29,7 +29,7 @@ ARM_DROP = 67  # release height in deposit()       (90)
+ ARM_PUSH = -13  # low enough to push the released piece into place
+ 
+ CLAW_CLOSED = 0
+-CLAW_OPEN = {1: 70, 2: 120, 3: 240, 4: 167}  # keyed by blocks abreast (167)
++CLAW_OPEN = {1: 70, 2: 120, 3: 215, 4: 215, 5: 310}  # keyed by blocks abreast (167)
+ CLAW_PUSH = 105  # partly closed onto a released piece to push it away
+ CLAW_CHANNEL_PULL = 150
+ 
+@@ -142,7 +142,7 @@ def reset_arm() -> None:
+     """Find the floor by stalling, then zero at grab height. Start with the arm up."""
+     arm_motor.run_angle(1000, -130, then=Stop.NONE)
+     arm_motor.run_until_stalled(-300, duty_limit=25)
+-    arm_motor.reset_angle(-67)
++    arm_motor.reset_angle(-28)
+     arm_down()
+ 
+ 
+@@ -621,17 +621,19 @@ def deposit_from_channels() -> None:
+ 
+ 
+ def deposit() -> None:
++    cage_up()
+     db.straight(105)  # 105?
+     reset_arm()
+     arm_to(ARM_DROP)
+     claw_open(4)  # Special dropping size
+-    db.straight(-50)
+-    arm_to(ARM_PUSH)
+-    db.settings(straight_speed=200)
+-    db.straight(50)
+-    db.settings(straight_speed=MAX_SPEED)
+-    claw_to(CLAW_PUSH)
+-    claw_open(3)
++    db.straight(30)
++    db.straight(-30)
++    # arm_to(ARM_PUSH)
++    # db.settings(straight_speed=200)
++    # db.straight(50)
++    # db.settings(straight_speed=MAX_SPEED)
++    # claw_to(CLAW_PUSH)
++    # claw_open(3)
+     arm_up()
+     db.straight(-105)
+     turn(180)
+@@ -659,6 +661,7 @@ def cage_smash() -> None:
+ 
+ def trowels() -> None:
+     """Start with the robot on the right side cross-junction, facing south."""
++    claw_open(5)
+     linetrack("right", 404)
+     db.straight(130)
+     turn(90)
+@@ -769,15 +772,15 @@ def cheese() -> None:
+     db.settings(straight_speed=200)
+     db.straight(200)
+     db.settings(straight_speed=MAX_SPEED)
+-    db.straight(-10)
+-    claw_close()
+-    claw_open(3)
+-    arm_to(ARM_HOVER_CHEDDAR)
+-    db.straight(30)
++    # db.straight(-10)
+     claw_close()
++    # claw_open(3)
++    # arm_to(ARM_HOVER_CHEDDAR)
++    # db.straight(30)
++    # claw_close()
+     claw_motor.dc(-100)
+     arm_up(speed=300)
+-    db.straight(-70)
++    db.straight(-50)
+     turn(90)
+ 
+     # COLLECT BOWL
+@@ -833,16 +836,18 @@ def cheese() -> None:
+     wall_align(1500, 90)
+     db.straight(136)  # TODO: this is  weird
+     turn(-90)
+-    reset_mechanisms()
++    # reset_mechanisms()
++    claw_open(3)
++    reset_arm()
+     arm_to(ARM_HOVER_BLUE)
+     db.settings(straight_speed=200)
+     db.straight(150)
+     db.settings(straight_speed=MAX_SPEED)
+-    db.straight(-10)
+-    claw_close()
+-    claw_open(3)
+-    arm_to(ARM_HOVER_BLUE)
+-    db.straight(20)
++    # db.straight(-10)
++    # claw_close()
++    # claw_open(3)
++    # arm_to(ARM_HOVER_BLUE)
++    # db.straight(20)
+     claw_close()
+     arm_up()
+     turn(90)

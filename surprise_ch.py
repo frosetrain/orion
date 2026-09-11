@@ -1,0 +1,71 @@
+ARM_STACK = 100
+CLAW_TWO = 160
+
+
+def cheese() -> None:
+    """Acquire, transport and deliver the Cheese."""
+    # GRAB CHEDDAR, PART ONE
+    turn(90)
+    reset_mechanisms()
+    claw_to(CLAW_TWO)
+    db.straight(320)
+    turn(-90)
+    db.straight(157)
+    linetrack("left", 344)
+    turn(-90)
+    # arm_down()
+    arm_to(ARM_HOVER_CHEDDAR)
+    db.straight(64 * 1)
+    claw_close()
+    db.straight(-64 * 1)
+    turn(-90)
+    # db.straight(160)
+    linetrack("right", 160)
+    turn(90)
+    claw_to(CLAW_TWO)
+    db.straight(64 * 1)
+    claw_close()
+    claw_open(2)
+    db.straight(16)
+    claw_close()
+    db.straight(-64 * 1 - 16)
+    turn(-90)
+    db.straight(185)
+    turn(-90)
+
+    # DEPOSIT CHEDDAR, PART ONE
+    linetrack("both", 675)
+    turn(-90)
+    db.straight(50)
+    claw_open(2)
+    arm_up()
+    db.straight(-50)
+    turn(-90)
+
+    # GRAB CHEDDAR, PART DEUX
+    linetrack("right", 675)
+    turn(90)
+    linetrack("left", 185)
+    turn(-90)
+    claw_to(CLAW_TWO)
+    arm_to(ARM_HOVER_CHEDDAR)
+    db.straight(64 * 3)
+    claw_close()
+    claw_open(2)
+    db.straight(16)
+    claw_close()
+    db.straight(-64 * 3 - 16)
+    turn(-90)
+    db.straight(185)
+    turn(-90)
+
+    # DEPOSIT CHEDDAR, PART DEUX
+    linetrack("both", 675)
+    arm_up()
+    turn(-90)
+    db.straight(50)
+    arm_to(ARM_STACK)
+    claw_open(2)
+    arm_up()
+    db.straight(-50)
+    turn(-90)
